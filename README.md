@@ -1,8 +1,12 @@
 # fast-jev-compaction
 
-Claude Code plugin that replaces the compaction summary with Jev decisions:
-every tool call is scored, stale outputs are cut to a note, every call stays,
-and everything kept stays verbatim. Also usable as an npm library.
+Claude Code plugin that asks Jev which tool results to shorten during
+compaction. Retained content stays verbatim. Also usable as a library.
+
+**Compaction is lossy.** The library keeps tool calls by default, but the
+Claude Code hook can remove calls Jev rated unneeded when shorter results
+alone do not meet its reduction target. Automatic compaction can fall back
+to Claude Code's built-in summary. See [Limitations](#limitations).
 
 > **Maintained fork** of
 > [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction).
@@ -13,11 +17,16 @@ and everything kept stays verbatim. Also usable as an npm library.
 > [FORK.md](FORK.md) is the audit log: every upstream PR and fork commit that
 > was read, with its verdict.
 
-### Demo
+### Promotional demo
 
 <a href="docs/media/fast-jev-compaction-promo.mp4"><img src="docs/media/fast-jev-compaction-poster.jpg" width="300" alt="Demo still: the same transcript before and after compaction"></a>
 
-[Watch the 30-second demo](docs/media/fast-jev-compaction-promo.mp4).
+[Watch the 30-second promo](docs/media/fast-jev-compaction-promo.mp4).
+
+Treat the promo as an illustration, not test evidence. The separate
+[animated demo app](#animated-demo-macos) uses a scripted transcript and
+makes no API calls. [Live verification notes](FORK.md#live-verification)
+describe the test setup and results.
 
 ### What this fork fixes
 
@@ -25,9 +34,10 @@ and everything kept stays verbatim. Also usable as an npm library.
   output of a parallel response made Claude Code split that response and
   report the other calls' outputs as missing. Only tool-result messages are
   rewritten now; reproduced and verified live on Claude Code 2.1.304.
-- **No erased calls** (#65, #123). A call Jev rates as unneeded stays whole
-  and its output becomes a one-line note, so the history never narrates work
-  with the evidence gone (after which a model has reported work it never did).
+- **Call preservation before extra reduction** (#65, #123). The default
+  library keeps a call Jev rates as unneeded and replaces its output with a
+  note. The hook may then remove those calls to meet its reduction target;
+  it does not guarantee complete history.
 - **No needless LLM summary** (#103). Only Claude Code's own automatic
   compaction, which must shrink the conversation, falls back to the built-in
   summary, and only after removing the calls Jev rated unneeded did not free
