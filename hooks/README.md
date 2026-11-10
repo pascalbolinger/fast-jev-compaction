@@ -154,7 +154,9 @@ A session is never sent to Jev when one of the `excludePaths` entries
 its repository's root (the main working tree's, for a worktree) or in its
 `origin` URL: the hook logs it, records an `excluded` event without the
 folder's name and hands the compaction to Claude Code's built-in summary,
-whatever `builtinFallback` says. With entries set, a session whose
+whatever `builtinFallback` says. The `turn.complete` hook never requests a
+compaction for such a session, so it is compacted when Claude Code's own
+threshold says so, not at `compactAtPercent`. With entries set, a session whose
 directory cannot be read counts as excluded. The check is where the session
 runs; a file read from an excluded folder in a session running elsewhere is
 not recognised, and neither is a copy of the folder under another name.

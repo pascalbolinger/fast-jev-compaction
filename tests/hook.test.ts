@@ -856,6 +856,18 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     expect(skipped.charsBefore).toBe(stubbed.charsBefore);
   });
 
+  it('does not request a compaction after an answer in an excluded folder', async () => {
+    const compact = vi.fn(async () => ({}));
+    const session = (cwd: string) => ({ usage: async () => ({ context: { percent: 80 } }), compact, cwd: async () => cwd, id: async () => 's' });
+    const excluded = reportingHost({ session: session('/Users/me/KI4MED/app') });
+    await registeredHooks({ excludePaths: 'ki4med' }).get('turn.complete')!(excluded.host, { reason: 'answer' }, async () => ({}));
+    expect(compact).not.toHaveBeenCalled();
+    expect(excluded.status).toEqual(['Jev ○ off in this folder (excludePaths: ki4med)']);
+    const elsewhere = reportingHost({ session: session('/work/other') });
+    await registeredHooks({ excludePaths: 'ki4med' }).get('turn.complete')!(elsewhere.host, { reason: 'answer' }, async () => ({}));
+    expect(compact).toHaveBeenCalledTimes(1);
+  });
+
   it('reads the key from the Keychain only when nothing else has it', async () => {
     const run = vi.fn(async () => ({ exitCode: 0, stdout: 'from-keychain-0123456789\n' }));
     const { host, bodies, files } = reportingHost({ env: { get: async () => undefined }, process: { run } });
