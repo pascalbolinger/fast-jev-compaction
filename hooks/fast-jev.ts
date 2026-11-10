@@ -696,6 +696,9 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const used = context.percent ?? 0;
       reporting.lastPercent = context.percent;
       await bounded($, showStatus($, reporting));
+      // An excluded session would get the built-in summary from this request,
+      // earlier than Claude Code's own threshold asks for one: leave it alone.
+      if (await exclusion($, configured.excludePaths)) return next(event);
       if (used < configured.compactAtPercent) retryAtPercent = 0;
       if (used < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       const { skip } = await $.session.compact();

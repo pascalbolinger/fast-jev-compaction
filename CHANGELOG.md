@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-11-10
+
+- A session in an excluded folder is no longer asked to compact at
+  `compactAtPercent`: the request could only end in the built-in summary,
+  earlier than Claude Code's own threshold.
+
 ## 0.6.0 — 2026-11-10
 
 Additions for running the hook on a machine where the key lives in the
