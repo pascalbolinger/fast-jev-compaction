@@ -13,7 +13,16 @@ import { jevAsker, type JevFetch, type JevFetchInit, type JevFetchResponse } fro
 import { compact, dropStubbedCalls, reductionRatio, resolveOptions } from '../src/compact.js';
 import { looksOpaque, redactSecrets } from '../src/redact.js';
 import { DEFAULT_MODEL } from '../src/request.js';
-import { DECIDE_DESCRIPTION, DECIDE_SCHEMA, DECIDE_TOOL, decideRequest, describeDecision } from './decide.js';
+import {
+  DECIDE_DESCRIPTION,
+  DECIDE_SCHEMA,
+  DECIDE_TOOL,
+  decideReminderText,
+  decideRequest,
+  describeDecision,
+  looksLikeDecision,
+  type DecideReminder,
+} from './decide.js';
 import {
   excludedBy,
   ledgerFileName,
@@ -55,6 +64,7 @@ const HOOK_DEFAULTS = {
   ledgerDir: '~/.fast-jev/events',
   statusLine: true,
   decideTool: true,
+  decideReminder: 'auto' as DecideReminder,
 };
 
 /**
@@ -87,6 +97,8 @@ export type HookConfig = CompactOptions & {
   statusLine: boolean;
   /** Offer the model the `jev_decide` tool. */
   decideTool: boolean;
+  /** Remind the model of the tool beside a prompt: one that looks like a decision, every one, or none. */
+  decideReminder: DecideReminder;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -97,6 +109,11 @@ function optionNumber(options: PluginOptions, key: string, fallback: number): nu
 function optionString(options: PluginOptions, key: string): string | undefined {
   const value = options[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function optionReminder(options: PluginOptions): DecideReminder {
+  const value = options['decideReminder'];
+  return value === 'auto' || value === 'always' || value === 'off' ? value : HOOK_DEFAULTS.decideReminder;
 }
 
 function optionFallback(options: PluginOptions): BuiltinFallback {
@@ -156,6 +173,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       typeof options['statusLine'] === 'boolean' ? options['statusLine'] : HOOK_DEFAULTS.statusLine,
     decideTool:
       typeof options['decideTool'] === 'boolean' ? options['decideTool'] : HOOK_DEFAULTS.decideTool,
+    decideReminder: optionReminder(options),
   };
   if (config.compactionTimeoutMs <= 0) config.compactionTimeoutMs = HOOK_DEFAULTS.compactionTimeoutMs;
   // Outside (0, 100] is a mistake: 0 or less would ask for a compaction after
@@ -592,6 +610,34 @@ export const register: Register = (on: On, options: PluginOptions) => {
     return started;
   });
 
+  // The prompts a person sent: typed here, sent from a phone, or handed in by an SDK host such as T3 Code.
+  const OWN_PROMPTS = new Set(['composer', 'bridge', 'sdk']);
+  // What the engine lets ride beside a prompt, all entries together.
+  const CONTEXT_MAX_CHARS = 32_000;
+
+  on('prompt.submit', async ($, event, next) => {
+    try {
+      const reminder = decideReminderText(DECIDE_TOOL_NAME);
+      const context = event.context ?? [];
+      const wanted =
+        configured.decideTool &&
+        configured.decideReminder !== 'off' &&
+        OWN_PROMPTS.has(event.origin.kind) &&
+        !event.text.trimStart().startsWith('/') &&
+        context.join('').length + reminder.length <= CONTEXT_MAX_CHARS &&
+        (configured.decideReminder === 'always' || looksLikeDecision(event.text)) &&
+        // A script's `claude -p` is nobody asking for a second opinion.
+        (event.origin.kind !== 'sdk' || (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'sdk-cli');
+      // An excluded session has no tool to be reminded of.
+      if (wanted && !(await exclusion($, configured.excludePaths))) {
+        return next({ ...event, context: [...context, reminder] });
+      }
+    } catch {
+      // a reminder that cannot be attached: the prompt goes in as it is
+    }
+    return next(event);
+  }).catch((_$, event, next) => next(event)); // a hook that overran its budget must not hold the prompt back
+
   on('tool.call', { tool: DECIDE_TOOL_NAME }, async ($, event) => {
     // Whatever happens, the model gets a result it can act on without Jev.
     const unasked = (why: string, what = 'was not asked') => ({ result: `Jev ${what} (${why}). Decide without it.` });
@@ -650,7 +696,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const why = redactSecrets(error instanceof Error ? error.message : String(error), secrets).text;
       return { result: `Jev did not decide (${why.length > 300 ? `${why.slice(0, 300)}…` : why}). Decide without it.` };
     }
-  });
+  }).catch(() => ({ result: 'Jev did not decide (the tool ran out of time). Decide without it.' }));
 
   on('session.compact', async ($, event, next) => {
     if (event.agentId) return next(event);

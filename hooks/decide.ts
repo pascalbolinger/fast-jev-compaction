@@ -172,3 +172,60 @@ export function describeDecision(request: DecideRequest, answer: JevAnswer | und
     line: `Jev decided: ${chosen} (confidence ${share(answer.confidence)})`,
   };
 }
+
+/** When the session reminds the model of the tool: for a prompt that looks like a decision, for every prompt, or never. */
+export type DecideReminder = 'auto' | 'always' | 'off';
+
+/** How much of a prompt is read for its shape: the question is at its start, and a pasted log must not cost seconds. */
+const SHAPE_SCAN_CHARS = 2_000;
+
+const DECISION_SHAPES: readonly RegExp[] = [
+  // German: "sollen wir", "ob wir ... sollen", "was würdest du", "welches ... nehmen", "A oder B?"
+  /\bsoll(en|te|ten|st)?\s+(ich|wir|man|er|sie|es|claude)\b/i,
+  /\bob\s+(ich|wir|man)\b[^?\n]{0,120}\bsoll(en|te|ten)?\b/i,
+  /\bwürdest\s+du\b/i,
+  /\bfindest\s+du\b[^\n]{0,80}\b(sinnvoll|richtig|gut|besser)\b/i,
+  /\bwelche[rsnm]?\b[^\n]{0,120}\b(nehmen|nehme|nimmst|verwenden|nutzen|benutzen|wählen|passt|eignet|besser|beste[nrs]?|sinnvoll\w*|empf\w+|soll\w*|günstiger|schneller)\b/i,
+  /\b(was|wer|wie|welche[rsnm]?)\b[^\n]{0,120}\b(besser|am besten|sinnvoller|geeigneter)\b/i,
+  /\bwäre\b[^\n]{0,80}\b(besser|sinnvoll\w*)\b/i,
+  /\b(besser|lieber|sinnvoll\w*|richtig so|gut so)\b[^?\n]{0,120}\?/i,
+  /\S+\s+oder\s+(?!so\b|nicht\b|was\b|wie\b)\S+[^?\n]{0,120}\?/i,
+  /\b(entscheide|entscheiden|entscheidest|empfiehl\w*|empfehl\w*|rätst|abwäg\w*|priorisier\w*|vergleich(e|en|st)?|recherchier(e|en|st)?|recherche|untersuch(e|en|st)?|lohnt|pro und contra|vor- und nachteile)\b/i,
+  // English
+  /\bshould\s+(i|we|it|he|she|they|this|that)\b/i,
+  /\bwould\s+you\b|\bdo\s+you\s+recommend\b|\bis\s+it\s+(worth|better)\b/i,
+  /\bwhich\b[^\n]{0,120}\b(better|best|should|use|pick|choose|fits?|cheaper|faster|recommend\w*)\b/i,
+  /\S+\s+or\s+(?!so\b|not\b)\S+[^?\n]{0,120}\?/i,
+  /\b(compare|comparison|recommend\w*|trade-?offs?|pros and cons|prioriti[sz]e)\b/i,
+  /\bresearch\b(?!\.\w)/i,
+  /\bdecide\s+(whether|which|between|if|on)\b/i,
+  /\b(vs\.?|versus)\b/i,
+];
+
+/**
+ * Whether a prompt reads like a decision to make or a research task: a
+ * choice between things, a "should we", a comparison. A filter for when to
+ * remind the model, and only that: the model still judges whether there is
+ * a decision to put to Jev. Only the start of a long prompt is read.
+ */
+export function looksLikeDecision(prompt: string): boolean {
+  const text = prompt.trim().slice(0, SHAPE_SCAN_CHARS);
+  if (text.length < 5 || text.startsWith('/')) return false;
+  return DECISION_SHAPES.some((shape) => shape.test(text));
+}
+
+/** What the model reads beside such a prompt; the user never sees it. */
+export function decideReminderText(toolName: string): string {
+  return (
+    `[fast-jev-compaction] The user has asked that Jev is consulted, visibly, on decisions and research. ` +
+    `If this message asks you to choose between options, to decide whether to do something, or to research or compare something, ` +
+    `call the ${toolName} tool before you answer (load it through tool search first if it is deferred): ` +
+    `for a choice, the options the user named or the ones you would weigh; for research, the judgement call it ends in ` +
+    `(which approach, source or product fits; whether what you found is enough). ` +
+    `Pass Jev only what it needs as context, never secrets, customer, patient or other personal data. ` +
+    `Then begin your answer with one line "JEV: <its answer> (<probability or confidence>)" and give your own reasoned decision: ` +
+    `Jev is a second opinion without reasons, not the verdict, and you say so when you disagree with it. ` +
+    `If the message holds no decision after all, or the tool was not asked or did not decide, begin with "JEV: nicht gefragt (<why>)" instead. ` +
+    `Do not call the tool for anything else.`
+  );
+}

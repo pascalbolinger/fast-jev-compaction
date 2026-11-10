@@ -11,7 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
-import { decideRequest, describeDecision } from '../hooks/decide.ts';
+import { decideReminderText, decideRequest, describeDecision, looksLikeDecision } from '../hooks/decide.ts';
 import { excludedBy, ledgerReason, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
@@ -135,7 +135,7 @@ describe('hook config bounds', () => {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true, decideTool: true });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true, decideTool: true, decideReminder: 'auto' });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no', logDecisions: true, dropCalls: true, builtinFallback: 'sometimes' }),
     ).toEqual({
@@ -145,6 +145,7 @@ describe('hook config', () => {
       excludePaths: [],
       statusLine: true,
       decideTool: true,
+      decideReminder: 'auto',
       keepThreshold: 0.3,
       maxStateTokens: 1000,
       model: 'jev-x',
@@ -1066,5 +1067,129 @@ describe('jev_decide tool', () => {
     expect(describeDecision(yesno, { noul: 0.644 }).text).toMatch(/^Jev: cannot tell \(probability of yes: 64%\)/);
     expect(describeDecision(yesno, { noul: 0.35 }).text).toMatch(/^Jev: no \(probability of yes: 35%\)/);
     expect(decideRequest({ question: 'q'.repeat(5000), context: 'c'.repeat(50000) }).state).toEqual({ question: 'q'.repeat(2000), context: 'c'.repeat(20000) });
+  });
+});
+
+describe('decision reminder', () => {
+  const TOOL = 'mcp__fast-jev-compaction__jev_decide';
+  const REMINDER = decideReminderText(TOOL);
+
+  async function submit(text: string, options: Record<string, unknown> = {}, extra: Record<string, unknown> = {}, cwd = '/work/acme/api', entrypoint = 'sdk-ts') {
+    const host = { session: { cwd: async () => cwd }, env: { get: async (name: string) => (name === 'CLAUDE_CODE_ENTRYPOINT' ? entrypoint : undefined) } };
+    let entered: { text: string; context?: readonly string[] } | undefined;
+    const out = await registeredHooks(options).get('prompt.submit')!(host, { text, wait: false, origin: { kind: 'sdk' }, ...extra }, async (event: { text: string; context?: readonly string[] }) => {
+      entered = event;
+      return { text: event.text, context: event.context };
+    });
+    return { entered: entered!, out };
+  }
+
+  it('recognises decisions, comparisons and research in German and English', () => {
+    for (const prompt of [
+      'Sollen wir Postgres oder SQLite verwenden?',
+      'soll ich das Logo links oder rechts setzen',
+      'Welches Modell passt für die Aufgabe?',
+      'Was ist besser für den Kunden, Reel oder Karussell?',
+      'Recherchiere bitte, welche Anbieter es für Newsletter gibt.',
+      'Mach eine Recherche zu Hosting in der EU',
+      'Vergleiche Netlify und Vercel',
+      'Lohnt es sich, das neu zu bauen?',
+      'Kannst du mir eine Empfehlung geben, wie wir vorgehen?',
+      'Should we ship this today?',
+      'Which library is the better fit?',
+      'Compare the two approaches',
+      'React vs Vue for this page',
+      'Do the research on EU hosting options',
+      'sollen wir das oder das verwenden',
+      'was würdest du nehmen',
+      'Wäre es besser Postgres zu nehmen',
+      'such mal raus was besser ist',
+      'Ich bin unsicher ob wir das so machen sollen',
+      'Findest du das sinnvoll',
+      'A vs B',
+      'What would you pick here',
+    ]) expect(looksLikeDecision(prompt), prompt).toBe(true);
+    for (const prompt of [
+      'Bau mir bitte das Kontaktformular ein.',
+      'Danke, passt.',
+      'Zeig mir den Stand.',
+      'ok',
+      '/compact',
+      'Fix the failing test in parser.ts',
+      'Mach den Button grün.',
+      'welche Datei ist das',
+      'zeig mir welche dateien geändert wurden',
+      'which file contains this?',
+      'der Server läuft oder?',
+      'Ich habe recherchiert und nichts gefunden.',
+      'Die Entscheidung ist gefallen, bau es so.',
+      'see research.md for the notes',
+      'run npm test and decide nothing',
+      'Schreib mir einen Text für Instagram oder so',
+    ]) expect(looksLikeDecision(prompt), prompt).toBe(false);
+    // a long single line is judged on its start, quickly
+    const started = Date.now();
+    expect(looksLikeDecision('oder '.repeat(60_000))).toBe(false);
+    expect(looksLikeDecision(`Sollen wir A oder B nehmen? ${'x '.repeat(60_000)}`)).toBe(true);
+    expect(looksLikeDecision(`${'x '.repeat(60_000)} Sollen wir A oder B nehmen?`)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('attaches the reminder to a decision the person sent, after what was already attached', async () => {
+    const { entered, out } = await submit('Sollen wir A oder B nehmen?', {}, { context: ['earlier'] });
+    expect(entered.text).toBe('Sollen wir A oder B nehmen?');
+    expect(entered.context).toEqual(['earlier', REMINDER]);
+    expect(out).toEqual({ text: 'Sollen wir A oder B nehmen?', context: ['earlier', REMINDER] });
+    expect(REMINDER).toContain(TOOL);
+    expect(REMINDER).toMatch(/begin your answer with one line "JEV: /);
+    expect(REMINDER).toMatch(/never secrets, customer, patient or other personal data/);
+    for (const kind of ['composer', 'bridge']) {
+      expect((await submit('Which one should we use?', {}, { origin: { kind } })).entered.context).toEqual([REMINDER]);
+    }
+  });
+
+  it('leaves every other prompt as it is', async () => {
+    expect((await submit('Bau das Formular ein.')).entered.context).toBeUndefined();
+    expect((await submit('Bau das Formular ein.', {}, { context: ['earlier'] })).entered.context).toEqual(['earlier']);
+    for (const kind of ['peer', 'task-notification', 'scheduled-trigger', 'peer-send-message', 'channel']) {
+      expect((await submit('Sollen wir A oder B nehmen?', {}, { origin: { kind } })).entered.context).toBeUndefined();
+    }
+    expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: 'off' })).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { decideTool: false })).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { excludePaths: 'ki4med' }, {}, '/Users/me/KI4MED/app')).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { excludePaths: 'ki4med' })).entered.context).toEqual([REMINDER]);
+  });
+
+  it('reminds on every prompt of the person with always, and survives a host that cannot say where it runs', async () => {
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'always' })).entered.context).toEqual([REMINDER]);
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'always' }, { origin: { kind: 'peer' } })).entered.context).toBeUndefined();
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'sometimes' })).entered.context).toBeUndefined();
+    // never for a slash command, a script's claude -p, or when it would not fit
+    for (const mode of ['auto', 'always']) {
+      expect((await submit('/model sollen wir A oder B nehmen?', { decideReminder: mode })).entered.context).toBeUndefined();
+      expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: mode }, {}, '/work/acme/api', 'sdk-cli')).entered.context).toBeUndefined();
+      expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: mode }, { origin: { kind: 'composer' } }, '/work/acme/api', 'sdk-cli')).entered.context).toEqual([REMINDER]);
+      const full = 'c'.repeat(32_000 - REMINDER.length + 1);
+      expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: mode }, { context: [full] })).entered.context).toEqual([full]);
+      const fits = 'c'.repeat(32_000 - REMINDER.length);
+      expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: mode }, { context: [fits] })).entered.context).toEqual([fits, REMINDER]);
+    }
+    // an unknown directory counts as excluded: no reminder, and the prompt still goes in
+    const hooks = registeredHooks({ excludePaths: 'ki4med' });
+    let entered: { text: string; context?: readonly string[] } | undefined;
+    await hooks.get('prompt.submit')!({ env: { get: async () => 'sdk-ts' }, session: { cwd: async () => { throw new Error('gone'); } } }, { text: 'Sollen wir A oder B nehmen?', wait: false, origin: { kind: 'sdk' } }, async (event: { text: string; context?: readonly string[] }) => {
+      entered = event;
+      return { text: event.text };
+    });
+    expect(entered).toEqual({ text: 'Sollen wir A oder B nehmen?', wait: false, origin: { kind: 'sdk' } });
+  });
+});
+
+describe('hooks that overrun their budget', () => {
+  it('let the prompt in unchanged and answer the tool call', async () => {
+    const hooks = registeredHooks({});
+    const event = { text: 'Sollen wir A oder B nehmen?', wait: false, origin: { kind: 'composer' } };
+    expect(await hooks.get('catch:prompt.submit')!({}, event, async (passed: unknown) => ({ passed }))).toEqual({ passed: event });
+    expect(await hooks.get('catch:tool.call')!({}, {}, async () => ({}))).toEqual({ result: 'Jev did not decide (the tool ran out of time). Decide without it.' });
   });
 });

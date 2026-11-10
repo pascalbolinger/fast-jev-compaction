@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions: stale tool outputs become a note, every call and message stays word for word. Maintained fork of tamaratran/fast-jev-compaction.",
   "license": "MIT",
   "userConfig": {
@@ -111,6 +111,12 @@
       "title": "Decision tool",
       "description": "Offer the model the jev_decide tool: one yes/no or multiple-choice question to Jev, answered with probabilities. Each call sends the question, the options and the context the model passes to TypeSafe; nothing else of the conversation.",
       "default": true
+    },
+    "decideReminder": {
+      "type": "string",
+      "title": "Decision reminder",
+      "description": "When the model is reminded, beside the user's prompt, to consult Jev through jev_decide and to begin its answer with a \"JEV: …\" line: auto (prompts that look like a decision, a comparison or research), always (every prompt of the person; the model judges), or off. Needs decideTool; never in excluded folders, for slash commands or in claude -p runs.",
+      "default": "auto"
     }
   },
   "author": {

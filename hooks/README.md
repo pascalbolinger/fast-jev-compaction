@@ -75,6 +75,7 @@ The plugin declares these `userConfig` values in
 | `excludePaths` | none |
 | `statusLine` | `true` |
 | `decideTool` | `true` |
+| `decideReminder` | `auto` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -82,8 +83,8 @@ development setup.
 
 Every option except `apiKey`, `keychainService`, `compactAtPercent`,
 `minReductionRatio`, `builtinFallback`, `compactionTimeoutMs`, `model`,
-`logDecisions`, `ledgerDir`, `excludePaths`, `statusLine` and `decideTool`
-is passed straight to the library; see the root README for what they do. Subagent and
+`logDecisions`, `ledgerDir`, `excludePaths`, `statusLine`, `decideTool` and
+`decideReminder` is passed straight to the library; see the root README for what they do. Subagent and
 fork compactions (`agentId`) go to the next handler untouched, and a
 `precompute` is skipped. If Jev fails, the response is malformed, the key is
 unavailable, or the estimated reduction is below `minReductionRatio`, what
@@ -190,6 +191,24 @@ Every decision shows as a tool call in the transcript and as one
 `Jev decided: …` log line, and is recorded in the ledger as a `decision`
 event with its kind (`yesno` or `choice`) and the tokens Jev reported; the
 question, the options, the context and the answer are not written.
+
+With `decideReminder` at `auto`, a `prompt.submit` hook attaches a context
+block (read by the model, not shown to the user) to a prompt the person sent
+(typed, sent over Remote Control, or handed in by an SDK host such as T3
+Code) that looks like a decision, a comparison or a research task: a "should
+we", a "which ... better", an "A or B?", "compare", "recherchiere" and the
+like, in German or English, judged on the prompt's first 2000 characters.
+The block tells the model to call `jev_decide` before answering and to begin
+its answer with `JEV: <answer> (<probability>)`, or with
+`JEV: nicht gefragt (<why>)` when there was no decision or the tool did not
+answer. `always` attaches it to every prompt of the person and leaves the
+judgement to the model; `off` attaches nothing. The patterns miss some
+decisions and hit some prompts that are none, and the model may still not
+follow the reminder: it makes a consultation likely, not certain. In either
+mode there is no reminder for a slash command, for a `claude -p` run (entry
+point `sdk-cli`), for prompts from other sessions, schedules and
+notifications, in an excluded folder, or when it would not fit beside the
+context a prompt already carries.
 
 ## Scope and caveat
 
