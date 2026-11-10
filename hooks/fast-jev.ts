@@ -612,17 +612,25 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   // The prompts a person sent: typed here, sent from a phone, or handed in by an SDK host such as T3 Code.
   const OWN_PROMPTS = new Set(['composer', 'bridge', 'sdk']);
+  // What the engine lets ride beside a prompt, all entries together.
+  const CONTEXT_MAX_CHARS = 32_000;
 
   on('prompt.submit', async ($, event, next) => {
     try {
+      const reminder = decideReminderText(DECIDE_TOOL_NAME);
+      const context = event.context ?? [];
       const wanted =
         configured.decideTool &&
         configured.decideReminder !== 'off' &&
         OWN_PROMPTS.has(event.origin.kind) &&
-        (configured.decideReminder === 'always' || looksLikeDecision(event.text));
+        !event.text.trimStart().startsWith('/') &&
+        context.join('').length + reminder.length <= CONTEXT_MAX_CHARS &&
+        (configured.decideReminder === 'always' || looksLikeDecision(event.text)) &&
+        // A script's `claude -p` is nobody asking for a second opinion.
+        (event.origin.kind !== 'sdk' || (await $.env.get('CLAUDE_CODE_ENTRYPOINT')) !== 'sdk-cli');
       // An excluded session has no tool to be reminded of.
       if (wanted && !(await exclusion($, configured.excludePaths))) {
-        return next({ ...event, context: [...(event.context ?? []), decideReminderText(DECIDE_TOOL_NAME)] });
+        return next({ ...event, context: [...context, reminder] });
       }
     } catch {
       // a reminder that cannot be attached: the prompt goes in as it is

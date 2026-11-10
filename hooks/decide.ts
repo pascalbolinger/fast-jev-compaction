@@ -176,31 +176,41 @@ export function describeDecision(request: DecideRequest, answer: JevAnswer | und
 /** When the session reminds the model of the tool: for a prompt that looks like a decision, for every prompt, or never. */
 export type DecideReminder = 'auto' | 'always' | 'off';
 
+/** How much of a prompt is read for its shape: the question is at its start, and a pasted log must not cost seconds. */
+const SHAPE_SCAN_CHARS = 2_000;
+
 const DECISION_SHAPES: readonly RegExp[] = [
-  // German
+  // German: "sollen wir", "ob wir ... sollen", "was würdest du", "welches ... nehmen", "A oder B?"
   /\bsoll(en|te|ten|st)?\s+(ich|wir|man|er|sie|es|claude)\b/i,
-  /\bwelche[rsnm]?\b/i,
-  /\b(was|wer|wie)\s+(ist|wäre|sind|passt|eignet)\b.*\b(besser|beste[nrs]?|am besten|sinnvoll(er)?|geeignet(er)?)\b/i,
-  /\b(besser|lieber|sinnvoller|eher)\b.*\?/i,
-  /\boder\b.*\?/i,
-  /\b(entscheid\w*|empfiehl\w*|empfehl\w*|rätst|raten würdest|vergleich\w*|abwäg\w*|priorisier\w*|recherch\w*|lohnt\s+(es\s+)?sich|pro und contra|vor- und nachteile)\b/i,
+  /\bob\s+(ich|wir|man)\b[^?\n]{0,120}\bsoll(en|te|ten)?\b/i,
+  /\bwürdest\s+du\b/i,
+  /\bfindest\s+du\b[^\n]{0,80}\b(sinnvoll|richtig|gut|besser)\b/i,
+  /\bwelche[rsnm]?\b[^\n]{0,120}\b(nehmen|nehme|nimmst|verwenden|nutzen|benutzen|wählen|passt|eignet|besser|beste[nrs]?|sinnvoll\w*|empf\w+|soll\w*|günstiger|schneller)\b/i,
+  /\b(was|wer|wie|welche[rsnm]?)\b[^\n]{0,120}\b(besser|am besten|sinnvoller|geeigneter)\b/i,
+  /\bwäre\b[^\n]{0,80}\b(besser|sinnvoll\w*)\b/i,
+  /\b(besser|lieber|sinnvoll\w*|richtig so|gut so)\b[^?\n]{0,120}\?/i,
+  /\S+\s+oder\s+(?!so\b|nicht\b|was\b|wie\b)\S+[^?\n]{0,120}\?/i,
+  /\b(entscheide|entscheiden|entscheidest|empfiehl\w*|empfehl\w*|rätst|abwäg\w*|priorisier\w*|vergleich(e|en|st)?|recherchier(e|en|st)?|recherche|untersuch(e|en|st)?|lohnt|pro und contra|vor- und nachteile)\b/i,
   // English
-  /\b(should|shall|would it be better|is it worth|do you recommend)\b/i,
-  /\b(which|whether)\b/i,
-  /\b(or)\b.*\?/i,
-  /\b(decide|decision|recommend\w*|compare|comparison|trade-?offs?|pros and cons|prioriti[sz]e|research)\b/i,
+  /\bshould\s+(i|we|it|he|she|they|this|that)\b/i,
+  /\bwould\s+you\b|\bdo\s+you\s+recommend\b|\bis\s+it\s+(worth|better)\b/i,
+  /\bwhich\b[^\n]{0,120}\b(better|best|should|use|pick|choose|fits?|cheaper|faster|recommend\w*)\b/i,
+  /\S+\s+or\s+(?!so\b|not\b)\S+[^?\n]{0,120}\?/i,
+  /\b(compare|comparison|recommend\w*|trade-?offs?|pros and cons|prioriti[sz]e)\b/i,
+  /\bresearch\b(?!\.\w)/i,
+  /\bdecide\s+(whether|which|between|if|on)\b/i,
   /\b(vs\.?|versus)\b/i,
 ];
 
 /**
  * Whether a prompt reads like a decision to make or a research task: a
  * choice between things, a "should we", a comparison. A filter for when to
- * remind the model, generous on purpose: the model still judges whether
- * there is a decision to put to Jev.
+ * remind the model, and only that: the model still judges whether there is
+ * a decision to put to Jev. Only the start of a long prompt is read.
  */
 export function looksLikeDecision(prompt: string): boolean {
-  const text = prompt.trim();
-  if (text.length < 8 || text.startsWith('/')) return false;
+  const text = prompt.trim().slice(0, SHAPE_SCAN_CHARS);
+  if (text.length < 5 || text.startsWith('/')) return false;
   return DECISION_SHAPES.some((shape) => shape.test(text));
 }
 

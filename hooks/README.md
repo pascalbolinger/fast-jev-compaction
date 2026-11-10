@@ -194,17 +194,21 @@ question, the options, the context and the answer are not written.
 
 With `decideReminder` at `auto`, a `prompt.submit` hook attaches a context
 block (read by the model, not shown to the user) to a prompt the person sent
-(typed, sent over Remote Control, or handed in by an SDK host) that looks
-like a decision, a comparison or a research task: a "should we", a "which",
-an "or" in a question, "compare", "recherchiere" and the like, in German or
-English. The block tells the model to call `jev_decide` before answering and
-to begin its answer with `JEV: <answer> (<probability>)`, or with
+(typed, sent over Remote Control, or handed in by an SDK host such as T3
+Code) that looks like a decision, a comparison or a research task: a "should
+we", a "which ... better", an "A or B?", "compare", "recherchiere" and the
+like, in German or English, judged on the prompt's first 2000 characters.
+The block tells the model to call `jev_decide` before answering and to begin
+its answer with `JEV: <answer> (<probability>)`, or with
 `JEV: nicht gefragt (<why>)` when there was no decision or the tool did not
-answer. `always` attaches it to every such prompt and leaves the judgement to
-the model; `off` attaches nothing. The pattern is generous and the model may
-still not follow the reminder: it makes a consultation likely, not certain.
-Slash commands, prompts from other sessions, schedules and notifications, and
-sessions in excluded folders get no reminder.
+answer. `always` attaches it to every prompt of the person and leaves the
+judgement to the model; `off` attaches nothing. The patterns miss some
+decisions and hit some prompts that are none, and the model may still not
+follow the reminder: it makes a consultation likely, not certain. In either
+mode there is no reminder for a slash command, for a `claude -p` run (entry
+point `sdk-cli`), for prompts from other sessions, schedules and
+notifications, in an excluded folder, or when it would not fit beside the
+context a prompt already carries.
 
 ## Scope and caveat
 
