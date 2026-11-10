@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 — 2026-11-10
+
+- `decideReminder` (default `auto`): beside a user's prompt that looks like
+  a decision, a comparison or a research task, the model is reminded to
+  consult Jev through `jev_decide` and to begin its answer with a
+  `JEV: …` line, so the consultation shows in the transcript twice: as the
+  tool call and in the answer. `always` reminds on every prompt, `off`
+  never. A reminder is an instruction to the model, not a guarantee.
+
 ## 0.7.0 — 2026-11-10
 
 - `jev_decide` tool (`decideTool`, default on): the model can put one yes/no

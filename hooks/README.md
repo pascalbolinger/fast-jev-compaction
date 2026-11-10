@@ -75,6 +75,7 @@ The plugin declares these `userConfig` values in
 | `excludePaths` | none |
 | `statusLine` | `true` |
 | `decideTool` | `true` |
+| `decideReminder` | `auto` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -82,8 +83,8 @@ development setup.
 
 Every option except `apiKey`, `keychainService`, `compactAtPercent`,
 `minReductionRatio`, `builtinFallback`, `compactionTimeoutMs`, `model`,
-`logDecisions`, `ledgerDir`, `excludePaths`, `statusLine` and `decideTool`
-is passed straight to the library; see the root README for what they do. Subagent and
+`logDecisions`, `ledgerDir`, `excludePaths`, `statusLine`, `decideTool` and
+`decideReminder` is passed straight to the library; see the root README for what they do. Subagent and
 fork compactions (`agentId`) go to the next handler untouched, and a
 `precompute` is skipped. If Jev fails, the response is malformed, the key is
 unavailable, or the estimated reduction is below `minReductionRatio`, what
@@ -190,6 +191,20 @@ Every decision shows as a tool call in the transcript and as one
 `Jev decided: …` log line, and is recorded in the ledger as a `decision`
 event with its kind (`yesno` or `choice`) and the tokens Jev reported; the
 question, the options, the context and the answer are not written.
+
+With `decideReminder` at `auto`, a `prompt.submit` hook attaches a context
+block (read by the model, not shown to the user) to a prompt the person sent
+(typed, sent over Remote Control, or handed in by an SDK host) that looks
+like a decision, a comparison or a research task: a "should we", a "which",
+an "or" in a question, "compare", "recherchiere" and the like, in German or
+English. The block tells the model to call `jev_decide` before answering and
+to begin its answer with `JEV: <answer> (<probability>)`, or with
+`JEV: nicht gefragt (<why>)` when there was no decision or the tool did not
+answer. `always` attaches it to every such prompt and leaves the judgement to
+the model; `off` attaches nothing. The pattern is generous and the model may
+still not follow the reminder: it makes a consultation likely, not certain.
+Slash commands, prompts from other sessions, schedules and notifications, and
+sessions in excluded folders get no reminder.
 
 ## Scope and caveat
 

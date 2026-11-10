@@ -172,3 +172,50 @@ export function describeDecision(request: DecideRequest, answer: JevAnswer | und
     line: `Jev decided: ${chosen} (confidence ${share(answer.confidence)})`,
   };
 }
+
+/** When the session reminds the model of the tool: for a prompt that looks like a decision, for every prompt, or never. */
+export type DecideReminder = 'auto' | 'always' | 'off';
+
+const DECISION_SHAPES: readonly RegExp[] = [
+  // German
+  /\bsoll(en|te|ten|st)?\s+(ich|wir|man|er|sie|es|claude)\b/i,
+  /\bwelche[rsnm]?\b/i,
+  /\b(was|wer|wie)\s+(ist|wäre|sind|passt|eignet)\b.*\b(besser|beste[nrs]?|am besten|sinnvoll(er)?|geeignet(er)?)\b/i,
+  /\b(besser|lieber|sinnvoller|eher)\b.*\?/i,
+  /\boder\b.*\?/i,
+  /\b(entscheid\w*|empfiehl\w*|empfehl\w*|rätst|raten würdest|vergleich\w*|abwäg\w*|priorisier\w*|recherch\w*|lohnt\s+(es\s+)?sich|pro und contra|vor- und nachteile)\b/i,
+  // English
+  /\b(should|shall|would it be better|is it worth|do you recommend)\b/i,
+  /\b(which|whether)\b/i,
+  /\b(or)\b.*\?/i,
+  /\b(decide|decision|recommend\w*|compare|comparison|trade-?offs?|pros and cons|prioriti[sz]e|research)\b/i,
+  /\b(vs\.?|versus)\b/i,
+];
+
+/**
+ * Whether a prompt reads like a decision to make or a research task: a
+ * choice between things, a "should we", a comparison. A filter for when to
+ * remind the model, generous on purpose: the model still judges whether
+ * there is a decision to put to Jev.
+ */
+export function looksLikeDecision(prompt: string): boolean {
+  const text = prompt.trim();
+  if (text.length < 8 || text.startsWith('/')) return false;
+  return DECISION_SHAPES.some((shape) => shape.test(text));
+}
+
+/** What the model reads beside such a prompt; the user never sees it. */
+export function decideReminderText(toolName: string): string {
+  return (
+    `[fast-jev-compaction] The user has asked that Jev is consulted, visibly, on decisions and research. ` +
+    `If this message asks you to choose between options, to decide whether to do something, or to research or compare something, ` +
+    `call the ${toolName} tool before you answer (load it through tool search first if it is deferred): ` +
+    `for a choice, the options the user named or the ones you would weigh; for research, the judgement call it ends in ` +
+    `(which approach, source or product fits; whether what you found is enough). ` +
+    `Pass Jev only what it needs as context, never secrets, customer, patient or other personal data. ` +
+    `Then begin your answer with one line "JEV: <its answer> (<probability or confidence>)" and give your own reasoned decision: ` +
+    `Jev is a second opinion without reasons, not the verdict, and you say so when you disagree with it. ` +
+    `If the message holds no decision after all, or the tool was not asked or did not decide, begin with "JEV: nicht gefragt (<why>)" instead. ` +
+    `Do not call the tool for anything else.`
+  );
+}

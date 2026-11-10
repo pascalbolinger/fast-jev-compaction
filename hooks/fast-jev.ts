@@ -13,7 +13,16 @@ import { jevAsker, type JevFetch, type JevFetchInit, type JevFetchResponse } fro
 import { compact, dropStubbedCalls, reductionRatio, resolveOptions } from '../src/compact.js';
 import { looksOpaque, redactSecrets } from '../src/redact.js';
 import { DEFAULT_MODEL } from '../src/request.js';
-import { DECIDE_DESCRIPTION, DECIDE_SCHEMA, DECIDE_TOOL, decideRequest, describeDecision } from './decide.js';
+import {
+  DECIDE_DESCRIPTION,
+  DECIDE_SCHEMA,
+  DECIDE_TOOL,
+  decideReminderText,
+  decideRequest,
+  describeDecision,
+  looksLikeDecision,
+  type DecideReminder,
+} from './decide.js';
 import {
   excludedBy,
   ledgerFileName,
@@ -55,6 +64,7 @@ const HOOK_DEFAULTS = {
   ledgerDir: '~/.fast-jev/events',
   statusLine: true,
   decideTool: true,
+  decideReminder: 'auto' as DecideReminder,
 };
 
 /**
@@ -87,6 +97,8 @@ export type HookConfig = CompactOptions & {
   statusLine: boolean;
   /** Offer the model the `jev_decide` tool. */
   decideTool: boolean;
+  /** Remind the model of the tool beside a prompt: one that looks like a decision, every one, or none. */
+  decideReminder: DecideReminder;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -97,6 +109,11 @@ function optionNumber(options: PluginOptions, key: string, fallback: number): nu
 function optionString(options: PluginOptions, key: string): string | undefined {
   const value = options[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function optionReminder(options: PluginOptions): DecideReminder {
+  const value = options['decideReminder'];
+  return value === 'auto' || value === 'always' || value === 'off' ? value : HOOK_DEFAULTS.decideReminder;
 }
 
 function optionFallback(options: PluginOptions): BuiltinFallback {
@@ -156,6 +173,7 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
       typeof options['statusLine'] === 'boolean' ? options['statusLine'] : HOOK_DEFAULTS.statusLine,
     decideTool:
       typeof options['decideTool'] === 'boolean' ? options['decideTool'] : HOOK_DEFAULTS.decideTool,
+    decideReminder: optionReminder(options),
   };
   if (config.compactionTimeoutMs <= 0) config.compactionTimeoutMs = HOOK_DEFAULTS.compactionTimeoutMs;
   // Outside (0, 100] is a mistake: 0 or less would ask for a compaction after
@@ -590,6 +608,26 @@ export const register: Register = (on: On, options: PluginOptions) => {
       }
     }
     return started;
+  });
+
+  // The prompts a person sent: typed here, sent from a phone, or handed in by an SDK host such as T3 Code.
+  const OWN_PROMPTS = new Set(['composer', 'bridge', 'sdk']);
+
+  on('prompt.submit', async ($, event, next) => {
+    try {
+      const wanted =
+        configured.decideTool &&
+        configured.decideReminder !== 'off' &&
+        OWN_PROMPTS.has(event.origin.kind) &&
+        (configured.decideReminder === 'always' || looksLikeDecision(event.text));
+      // An excluded session has no tool to be reminded of.
+      if (wanted && !(await exclusion($, configured.excludePaths))) {
+        return next({ ...event, context: [...(event.context ?? []), decideReminderText(DECIDE_TOOL_NAME)] });
+      }
+    } catch {
+      // a reminder that cannot be attached: the prompt goes in as it is
+    }
+    return next(event);
   });
 
   on('tool.call', { tool: DECIDE_TOOL_NAME }, async ($, event) => {

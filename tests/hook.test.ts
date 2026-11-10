@@ -11,7 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
-import { decideRequest, describeDecision } from '../hooks/decide.ts';
+import { decideReminderText, decideRequest, describeDecision, looksLikeDecision } from '../hooks/decide.ts';
 import { excludedBy, ledgerReason, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
@@ -135,7 +135,7 @@ describe('hook config bounds', () => {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true, decideTool: true });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true, decideTool: true, decideReminder: 'auto' });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no', logDecisions: true, dropCalls: true, builtinFallback: 'sometimes' }),
     ).toEqual({
@@ -145,6 +145,7 @@ describe('hook config', () => {
       excludePaths: [],
       statusLine: true,
       decideTool: true,
+      decideReminder: 'auto',
       keepThreshold: 0.3,
       maxStateTokens: 1000,
       model: 'jev-x',
@@ -1066,5 +1067,87 @@ describe('jev_decide tool', () => {
     expect(describeDecision(yesno, { noul: 0.644 }).text).toMatch(/^Jev: cannot tell \(probability of yes: 64%\)/);
     expect(describeDecision(yesno, { noul: 0.35 }).text).toMatch(/^Jev: no \(probability of yes: 35%\)/);
     expect(decideRequest({ question: 'q'.repeat(5000), context: 'c'.repeat(50000) }).state).toEqual({ question: 'q'.repeat(2000), context: 'c'.repeat(20000) });
+  });
+});
+
+describe('decision reminder', () => {
+  const TOOL = 'mcp__fast-jev-compaction__jev_decide';
+  const REMINDER = decideReminderText(TOOL);
+
+  async function submit(text: string, options: Record<string, unknown> = {}, extra: Record<string, unknown> = {}, cwd = '/work/acme/api') {
+    const host = { session: { cwd: async () => cwd } };
+    let entered: { text: string; context?: readonly string[] } | undefined;
+    const out = await registeredHooks(options).get('prompt.submit')!(host, { text, wait: false, origin: { kind: 'sdk' }, ...extra }, async (event: { text: string; context?: readonly string[] }) => {
+      entered = event;
+      return { text: event.text, context: event.context };
+    });
+    return { entered: entered!, out };
+  }
+
+  it('recognises decisions, comparisons and research in German and English', () => {
+    for (const prompt of [
+      'Sollen wir Postgres oder SQLite verwenden?',
+      'soll ich das Logo links oder rechts setzen',
+      'Welches Modell passt für die Aufgabe?',
+      'Was ist besser für den Kunden, Reel oder Karussell?',
+      'Recherchiere bitte, welche Anbieter es für Newsletter gibt.',
+      'Mach eine Recherche zu Hosting in der EU',
+      'Vergleiche Netlify und Vercel',
+      'Lohnt es sich, das neu zu bauen?',
+      'Kannst du mir eine Empfehlung geben, wie wir vorgehen?',
+      'Should we ship this today?',
+      'Which library is the better fit?',
+      'Compare the two approaches',
+      'React vs Vue for this page',
+      'Do the research on EU hosting options',
+    ]) expect(looksLikeDecision(prompt), prompt).toBe(true);
+    for (const prompt of [
+      'Bau mir bitte das Kontaktformular ein.',
+      'Danke, passt.',
+      'Zeig mir den Stand.',
+      'ok',
+      '/compact',
+      'Fix the failing test in parser.ts',
+      'Mach den Button grün.',
+    ]) expect(looksLikeDecision(prompt), prompt).toBe(false);
+  });
+
+  it('attaches the reminder to a decision the person sent, after what was already attached', async () => {
+    const { entered, out } = await submit('Sollen wir A oder B nehmen?', {}, { context: ['earlier'] });
+    expect(entered.text).toBe('Sollen wir A oder B nehmen?');
+    expect(entered.context).toEqual(['earlier', REMINDER]);
+    expect(out).toEqual({ text: 'Sollen wir A oder B nehmen?', context: ['earlier', REMINDER] });
+    expect(REMINDER).toContain(TOOL);
+    expect(REMINDER).toMatch(/begin your answer with one line "JEV: /);
+    expect(REMINDER).toMatch(/never secrets, customer, patient or other personal data/);
+    for (const kind of ['composer', 'bridge']) {
+      expect((await submit('Which one?', {}, { origin: { kind } })).entered.context).toEqual([REMINDER]);
+    }
+  });
+
+  it('leaves every other prompt as it is', async () => {
+    expect((await submit('Bau das Formular ein.')).entered.context).toBeUndefined();
+    expect((await submit('Bau das Formular ein.', {}, { context: ['earlier'] })).entered.context).toEqual(['earlier']);
+    for (const kind of ['peer', 'task-notification', 'scheduled-trigger', 'peer-send-message', 'channel']) {
+      expect((await submit('Sollen wir A oder B nehmen?', {}, { origin: { kind } })).entered.context).toBeUndefined();
+    }
+    expect((await submit('Sollen wir A oder B nehmen?', { decideReminder: 'off' })).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { decideTool: false })).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { excludePaths: 'ki4med' }, {}, '/Users/me/KI4MED/app')).entered.context).toBeUndefined();
+    expect((await submit('Sollen wir A oder B nehmen?', { excludePaths: 'ki4med' })).entered.context).toEqual([REMINDER]);
+  });
+
+  it('reminds on every prompt of the person with always, and survives a host that cannot say where it runs', async () => {
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'always' })).entered.context).toEqual([REMINDER]);
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'always' }, { origin: { kind: 'peer' } })).entered.context).toBeUndefined();
+    expect((await submit('Bau das Formular ein.', { decideReminder: 'sometimes' })).entered.context).toBeUndefined();
+    // an unknown directory counts as excluded: no reminder, and the prompt still goes in
+    const hooks = registeredHooks({ excludePaths: 'ki4med' });
+    let entered: { text: string; context?: readonly string[] } | undefined;
+    await hooks.get('prompt.submit')!({ session: { cwd: async () => { throw new Error('gone'); } } }, { text: 'Sollen wir A oder B nehmen?', wait: false, origin: { kind: 'sdk' } }, async (event: { text: string; context?: readonly string[] }) => {
+      entered = event;
+      return { text: event.text };
+    });
+    expect(entered).toEqual({ text: 'Sollen wir A oder B nehmen?', wait: false, origin: { kind: 'sdk' } });
   });
 });
