@@ -6,7 +6,7 @@ import type { CompactResult } from '../src/types.js';
  * same file. Sizes only; no message text, no tool input, no path beyond the
  * working directory's last segment.
  */
-export type LedgerOutcome = 'compacted' | 'calls-removed' | 'fallback' | 'skipped' | 'excluded';
+export type LedgerOutcome = 'compacted' | 'calls-removed' | 'fallback' | 'skipped' | 'excluded' | 'decision';
 
 export type LedgerEvent = {
   v: 1;
@@ -18,6 +18,8 @@ export type LedgerEvent = {
   project?: string;
   trigger: string;
   outcome: LedgerOutcome;
+  /** For a `decision`: `yesno` or `choice`. Never the question or the answer. */
+  kind?: string;
   messagesBefore?: number;
   messagesAfter?: number;
   charsBefore?: number;

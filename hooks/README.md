@@ -74,6 +74,7 @@ The plugin declares these `userConfig` values in
 | `ledgerDir` | `~/.fast-jev/events` |
 | `excludePaths` | none |
 | `statusLine` | `true` |
+| `decideTool` | `true` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
@@ -81,8 +82,8 @@ development setup.
 
 Every option except `apiKey`, `keychainService`, `compactAtPercent`,
 `minReductionRatio`, `builtinFallback`, `compactionTimeoutMs`, `model`,
-`logDecisions`, `ledgerDir`, `excludePaths` and `statusLine` is passed
-straight to the library; see the root README for what they do. Subagent and
+`logDecisions`, `ledgerDir`, `excludePaths`, `statusLine` and `decideTool`
+is passed straight to the library; see the root README for what they do. Subagent and
 fork compactions (`agentId`) go to the next handler untouched, and a
 `precompute` is skipped. If Jev fails, the response is malformed, the key is
 unavailable, or the estimated reduction is below `minReductionRatio`, what
@@ -167,6 +168,28 @@ start, after every main-agent answer and after every installed compaction
 `Jev ● armed · context 34% · compacts at 60% · freed ~120k tokens in 3 runs`.
 Headless surfaces (`-p`, the SDK) have no status line. The ledger and the
 status line wait at most two seconds for a write or the Keychain.
+
+## The decision tool
+
+With `decideTool` on, the session offers the model
+`mcp__fast-jev-compaction__jev_decide`: a `question`, optionally 2 to 8
+`options` (`name`, `description`), and a `context` with the facts. Without
+options the question is yes/no (a `noul` question; the result gives the
+probability of yes, and "cannot tell" when it rounds to more than 35% and
+less than 65%); with options it is a `choice` question (the chosen option,
+its confidence and every option's probability; a confidence under 65% is
+called low). Jev gets these three fields as the request and nothing else of
+the conversation; they go through the same redaction as a compaction (the
+options travel as `A`, `B`, ... with their names in the redacted values).
+A session in an excluded folder is not offered the tool, and one without a
+key gets a result saying Jev was not asked. A failure, or no answer within
+20 seconds, never fails the call: the result says so and tells the model to
+decide without it.
+
+Every decision shows as a tool call in the transcript and as one
+`Jev decided: …` log line, and is recorded in the ledger as a `decision`
+event with its kind (`yesno` or `choice`) and the tokens Jev reported; the
+question, the options, the context and the answer are not written.
 
 ## Scope and caveat
 

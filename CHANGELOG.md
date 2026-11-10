@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — 2026-11-10
+
+- `jev_decide` tool (`decideTool`, default on): the model can put one yes/no
+  or multiple-choice question to Jev and gets probabilities back. Jev sees
+  the question, the options and the context of that call only. Each decision
+  is a tool call in the transcript, one log line and a `decision` event in
+  the ledger (its kind and the tokens Jev reported, never the question).
+  Excluded folders are not asked.
+
 ## 0.6.1 — 2026-11-10
 
 - A session in an excluded folder is no longer asked to compact at
