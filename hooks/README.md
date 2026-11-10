@@ -175,13 +175,16 @@ With `decideTool` on, the session offers the model
 `mcp__fast-jev-compaction__jev_decide`: a `question`, optionally 2 to 8
 `options` (`name`, `description`), and a `context` with the facts. Without
 options the question is yes/no (a `noul` question; the result gives the
-probability of yes, and "cannot tell" between 35% and 65%); with options it
-is a `choice` question (the chosen option, its confidence and every option's
-probability). Jev gets these three fields as the request and nothing else of
-the conversation; they go through the same redaction as a compaction. A
-session in an excluded folder, or one without a key, gets a result saying
-Jev was not asked. A failure never fails the call: the result says so and
-tells the model to decide without it.
+probability of yes, and "cannot tell" when it rounds to more than 35% and
+less than 65%); with options it is a `choice` question (the chosen option,
+its confidence and every option's probability; a confidence under 65% is
+called low). Jev gets these three fields as the request and nothing else of
+the conversation; they go through the same redaction as a compaction (the
+options travel as `A`, `B`, ... with their names in the redacted values).
+A session in an excluded folder is not offered the tool, and one without a
+key gets a result saying Jev was not asked. A failure, or no answer within
+20 seconds, never fails the call: the result says so and tells the model to
+decide without it.
 
 Every decision shows as a tool call in the transcript and as one
 `Jev decided: …` log line, and is recorded in the ledger as a `decision`

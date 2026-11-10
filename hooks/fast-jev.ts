@@ -581,7 +581,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
   on('session.start', async ($, event, next) => {
     await bounded($, showStatus($, reporting));
     const started = await next(event);
-    if (configured.decideTool) {
+    // An excluded session would only ever be told that Jev was not asked.
+    if (configured.decideTool && !(await exclusion($, configured.excludePaths))) {
       try {
         await $.tool.register({ name: DECIDE_TOOL, description: DECIDE_DESCRIPTION, inputSchema: DECIDE_SCHEMA });
       } catch (error) {
@@ -593,7 +594,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('tool.call', { tool: DECIDE_TOOL_NAME }, async ($, event) => {
     // Whatever happens, the model gets a result it can act on without Jev.
-    const unasked = (why: string) => ({ result: `Jev was not asked (${why}). Decide without it.` });
+    const unasked = (why: string, what = 'was not asked') => ({ result: `Jev ${what} (${why}). Decide without it.` });
     let secrets: string[] = [];
     try {
       const request = decideRequest(event as unknown as Readonly<Record<string, unknown>>);
@@ -616,13 +617,23 @@ export const register: Register = (on: On, options: PluginOptions) => {
         undefined,
         { known: knownSecrets(env) },
       );
-      const response = await withCompactionDeadline(
-        () => asker.ask(request.state, request.questions),
-        DECIDE_TIMEOUT_MS,
-        (ms, sleepOptions) => $.clock.sleep(ms, sleepOptions),
-      );
+      let response;
+      try {
+        response = await withCompactionDeadline(
+          () => asker.ask(request.state, request.questions),
+          DECIDE_TIMEOUT_MS,
+          (ms, sleepOptions) => $.clock.sleep(ms, sleepOptions),
+        );
+      } catch (error) {
+        if (error instanceof CompactionTimeoutError) return unasked(`no answer within ${DECIDE_TIMEOUT_MS / 1000} s`, 'did not decide');
+        throw error;
+      }
       const decision = describeDecision(request, response.answers['decision']);
-      $.ui.log(decision.line);
+      try {
+        $.ui.log(decision.line);
+      } catch {
+        // a surface without a transcript: the answer stands
+      }
       await bounded(
         $,
         record($, configured.ledgerDir, {

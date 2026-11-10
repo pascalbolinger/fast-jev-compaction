@@ -985,14 +985,14 @@ describe('jev_decide tool', () => {
     expect(body.questions.decision.type).toBe('noul');
     const [event] = events(files);
     expect(event).toMatchObject({ outcome: 'decision', kind: 'yesno', trigger: 'tool', requests: 1, jevTokens: 321, jevTokensReported: true, project: 'api' });
-    expect(JSON.stringify(event)).not.toMatch(/migration|nullable|83/i);
+    expect(JSON.stringify(event)).not.toMatch(/migration|nullable|reversible|probab/i);
   });
 
   it('answers a multiple-choice question with every probability', async () => {
-    const { host, files, bodies } = decideHost({ choice: 'patch', confidence: 0.71, probabilities: { patch: 0.71, rewrite: 0.2, wait: 0.09 } });
+    const { host, files, bodies } = decideHost({ choice: 'B', confidence: 0.71, probabilities: { B: 0.71, A: 0.2, C: 0.09 } });
     const out = await registeredHooks({}).get('tool.call')!(host, { tool: TOOL, question: 'Which fix?', options: [{ name: 'rewrite', description: 'Start over.' }, { name: 'patch' }, 'wait'] }, async () => ({}));
     expect(out).toEqual({ result: 'Jev: "patch" (confidence 71%). Probabilities: patch 71%, rewrite 20%, wait 9%. Jev gives no reasons and saw only the question, options and context of this call.' });
-    expect(JSON.parse(bodies[0]!).questions.decision).toEqual({ type: 'choice', instructions: 'Which fix?', criteria: { rewrite: 'Start over.', patch: null, wait: null } });
+    expect(JSON.parse(bodies[0]!).questions.decision).toEqual({ type: 'choice', instructions: 'Which fix?', criteria: { A: 'rewrite: Start over.', B: 'patch', C: 'wait' } });
     expect(events(files)[0]).toMatchObject({ outcome: 'decision', kind: 'choice' });
   });
 
@@ -1018,10 +1018,37 @@ describe('jev_decide tool', () => {
     expect(failed).not.toContain(key);
     expect(failing.files.size).toBe(0);
     // the wrong kind of answer is a failure, not a guess
-    const wrong = decideHost({ choice: 'x', confidence: 1, probabilities: { x: 1 } });
+    const wrong = decideHost({ choice: 'A', confidence: 1, probabilities: { A: 1 } });
     expect((await call(wrong.host, { question: 'Go?' })).result).toBe('Jev did not decide (Jev gave no yes/no answer). Decide without it.');
-    const stray = decideHost({ choice: 'c', confidence: 1, probabilities: { c: 1 } });
+    const stray = decideHost({ choice: 'C', confidence: 1, probabilities: { C: 1 } });
     expect((await call(stray.host, { question: 'Which?', options: ['a', 'b'] })).result).toBe('Jev did not decide (Jev chose an option that was not offered). Decide without it.');
+  });
+
+  it('keeps secrets out of the request wherever the call carries them', async () => {
+    const plain = ['plain', 'word', 'secret', 'value'].join('-');
+    const { host, bodies } = decideHost({ choice: 'A', confidence: 0.9, probabilities: { A: 0.9, B: 0.1 } }, { settings: { read: async () => ({ env: { MY_SERVICE_TOKEN: plain } }) } });
+    const token = 'sk-ant-api03-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+    await registeredHooks({}).get('tool.call')!(host, { tool: 'x', question: `Use ${plain}?`, context: `It is ${plain}.`, options: [{ name: token, description: `With ${plain}.` }, { name: `keep ${plain}` }] }, async () => ({}));
+    expect(bodies.length).toBe(1);
+    expect(bodies[0]).not.toContain(plain);
+    expect(bodies[0]).not.toContain(token);
+    expect(Object.keys(JSON.parse(bodies[0]!).questions.decision.criteria)).toEqual(['A', 'B']);
+  });
+
+  it('is not offered in an excluded folder, and gives up after twenty seconds', async () => {
+    const excluded = decideHost({ noul: 1 }, { session: { id: async () => 's', cwd: async () => '/Users/me/KI4MED/app' } });
+    await registeredHooks({ excludePaths: 'ki4med' }).get('session.start')!(excluded.host, {}, async () => ({}));
+    expect(excluded.registered).toEqual([]);
+    const slow = decideHost({ noul: 1 }, {
+      http: { fetch: () => new Promise(() => {}) },
+      clock: { sleep: (ms: number, options: { signal: AbortSignal }) => (ms === 20000 ? Promise.resolve() : sleep(ms, options)) },
+    });
+    expect(await registeredHooks({}).get('tool.call')!(slow.host, { tool: 'x', question: 'Go?' }, async () => ({}))).toEqual({ result: 'Jev did not decide (no answer within 20 s). Decide without it.' });
+    expect(slow.files.size).toBe(0);
+    // a transcript that cannot take the line does not undo the answer
+    const mute = decideHost({ noul: 0.9 }, { ui: { log: () => { throw new Error('no transcript'); }, toast: () => {}, status: () => {} } });
+    expect(await registeredHooks({}).get('tool.call')!(mute.host, { tool: 'x', question: 'Go?' }, async () => ({}))).toMatchObject({ result: expect.stringMatching(/^Jev: yes/) });
+    expect(mute.files.size).toBe(1);
   });
 
   it('says so when Jev cannot tell', () => {
@@ -1029,7 +1056,15 @@ describe('jev_decide tool', () => {
     expect(describeDecision(yesno, { noul: 0.55 }).text).toBe('Jev: cannot tell (probability of yes: 55%). This is close to a coin flip: do not lean on it. Jev gives no reasons and saw only the question and context of this call.');
     expect(describeDecision(yesno, { noul: 0.1 }).line).toBe('Jev decided: no (yes 10%)');
     const choice = decideRequest({ question: 'Which?', options: ['a', 'b'] });
-    expect(describeDecision(choice, { choice: 'a', confidence: 0.52, probabilities: { a: 0.52, b: 0.48 } }).text).toContain('The confidence is low: do not lean on it.');
+    expect(describeDecision(choice, { choice: 'A', confidence: 0.52, probabilities: { A: 0.52, B: 0.48 } }).text).toContain('"a" (confidence 52%). Probabilities: a 52%, b 48%. The confidence is low: do not lean on it.');
+    expect(describeDecision(choice, { choice: 'A', confidence: 0.9, probabilities: { A: 0.2, B: 0.8 } }).text).toContain('the answer contradicts itself');
+    expect(() => describeDecision(choice, { choice: 'A', confidence: 7, probabilities: { A: 1 } })).toThrow('confidence outside 0 to 1');
+    expect(() => describeDecision(choice, { choice: 'a', confidence: 1, probabilities: { a: 1 } })).toThrow('not offered');
+    expect(() => describeDecision(yesno, { noul: 1.5 })).toThrow('outside 0 to 1');
+    // the verdict goes by the percentage shown
+    expect(describeDecision(yesno, { noul: 0.6496 }).text).toMatch(/^Jev: yes \(probability of yes: 65%\)/);
+    expect(describeDecision(yesno, { noul: 0.644 }).text).toMatch(/^Jev: cannot tell \(probability of yes: 64%\)/);
+    expect(describeDecision(yesno, { noul: 0.35 }).text).toMatch(/^Jev: no \(probability of yes: 35%\)/);
     expect(decideRequest({ question: 'q'.repeat(5000), context: 'c'.repeat(50000) }).state).toEqual({ question: 'q'.repeat(2000), context: 'c'.repeat(20000) });
   });
 });

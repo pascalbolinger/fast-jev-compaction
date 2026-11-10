@@ -13,7 +13,7 @@ const MAX_OPTIONS = 8;
 const MAX_OPTION_CHARS = 500;
 
 export const DECIDE_DESCRIPTION =
-  'Ask Jev (TypeSafe System One, a fast external decision model) one yes/no or multiple-choice question and get calibrated probabilities back. ' +
+  'Ask Jev (TypeSafe System One, a fast external decision model) one yes/no or multiple-choice question and get probabilities back. ' +
   'Use it as a second opinion on a judgement call with clear options: which of several approaches fits, whether something is done, relevant, risky or worth doing. ' +
   'Jev sees ONLY the question, the options and the context you pass, never the conversation, so put every fact it needs into `context`. ' +
   'It gives no reasons: report the answer with its probability, treat a probability near 0.5 (or a low confidence) as "Jev cannot tell", and decide yourself. ' +
@@ -51,6 +51,14 @@ export type DecideRequest = {
   questions: JevQuestions;
   options: DecideOption[];
 };
+
+/**
+ * The key an option travels under: `A`, `B`, ... Its name goes in the value
+ * beside it, because a request's values are redacted and its keys are not.
+ */
+export function optionId(index: number): string {
+  return String.fromCharCode(65 + index);
+}
 
 function text(value: unknown, limit: number): string {
   return typeof value === 'string' ? value.trim().slice(0, limit) : '';
@@ -96,7 +104,12 @@ export function decideRequest(input: Readonly<Record<string, unknown>>): DecideR
       decision: {
         type: 'choice',
         instructions: question,
-        criteria: Object.fromEntries(options.map((option) => [option.name, option.description ?? null])),
+        criteria: Object.fromEntries(
+          options.map((option, index) => [
+            optionId(index),
+            option.description ? `${option.name}: ${option.description}` : option.name,
+          ]),
+        ),
       },
     },
   };
@@ -106,8 +119,12 @@ function share(probability: number): string {
   return `${Math.round(Math.min(1, Math.max(0, probability)) * 100)}%`;
 }
 
-/** Between these a yes/no answer says nothing either way. */
-const UNSURE_BELOW = 0.65;
+/** A yes/no answer leaning less than this far either way, or a choice less confident, says nothing. */
+const UNSURE_BELOW_PERCENT = 65;
+
+function percent(probability: number): number {
+  return Math.round(Math.min(1, Math.max(0, probability)) * 100);
+}
 
 export type Decision = {
   /** What the model reads as the tool's result. */
@@ -120,9 +137,11 @@ export type Decision = {
 export function describeDecision(request: DecideRequest, answer: JevAnswer | undefined): Decision {
   if (request.kind === 'yesno') {
     if (!answer || !('noul' in answer) || !Number.isFinite(answer.noul)) throw new Error('Jev gave no yes/no answer');
-    const yes = Math.min(1, Math.max(0, answer.noul));
-    const leaning = Math.max(yes, 1 - yes);
-    const verdict = leaning < UNSURE_BELOW ? 'cannot tell' : yes >= 0.5 ? 'yes' : 'no';
+    if (answer.noul < 0 || answer.noul > 1) throw new Error('Jev gave a probability outside 0 to 1');
+    const yes = answer.noul;
+    // Judged on the percentage shown, so the verdict never contradicts it.
+    const leaning = Math.max(percent(yes), 100 - percent(yes));
+    const verdict = leaning < UNSURE_BELOW_PERCENT ? 'cannot tell' : yes >= 0.5 ? 'yes' : 'no';
     return {
       text:
         `Jev: ${verdict} (probability of yes: ${share(yes)}).` +
@@ -132,18 +151,24 @@ export function describeDecision(request: DecideRequest, answer: JevAnswer | und
     };
   }
   if (!answer || !('choice' in answer) || typeof answer.choice !== 'string') throw new Error('Jev gave no choice');
-  const known = new Set(request.options.map((option) => option.name));
-  if (!known.has(answer.choice)) throw new Error('Jev chose an option that was not offered');
+  const names = new Map(request.options.map((option, index) => [optionId(index), option.name]));
+  const chosen = names.get(answer.choice);
+  if (chosen === undefined) throw new Error('Jev chose an option that was not offered');
+  if (!Number.isFinite(answer.confidence) || answer.confidence < 0 || answer.confidence > 1) {
+    throw new Error('Jev gave a confidence outside 0 to 1');
+  }
   const ranked = Object.entries(answer.probabilities)
-    .filter(([name, probability]) => known.has(name) && Number.isFinite(probability))
+    .filter(([id, probability]) => names.has(id) && Number.isFinite(probability))
     .sort((a, b) => b[1] - a[1]);
-  const unsure = answer.confidence < UNSURE_BELOW;
+  const top = ranked[0];
+  const outranked = top !== undefined && top[0] !== answer.choice && top[1] > (answer.probabilities[answer.choice] ?? 0);
+  const unsure = percent(answer.confidence) < UNSURE_BELOW_PERCENT;
   return {
     text:
-      `Jev: "${answer.choice}" (confidence ${share(answer.confidence)}).` +
-      (ranked.length > 0 ? ` Probabilities: ${ranked.map(([name, probability]) => `${name} ${share(probability)}`).join(', ')}.` : '') +
-      (unsure ? ' The confidence is low: do not lean on it.' : '') +
+      `Jev: "${chosen}" (confidence ${share(answer.confidence)}).` +
+      (ranked.length > 0 ? ` Probabilities: ${ranked.map(([id, probability]) => `${names.get(id)} ${share(probability)}`).join(', ')}.` : '') +
+      (outranked ? ' Another option has the higher probability: the answer contradicts itself, do not lean on it.' : unsure ? ' The confidence is low: do not lean on it.' : '') +
       ' Jev gives no reasons and saw only the question, options and context of this call.',
-    line: `Jev decided: ${answer.choice} (confidence ${share(answer.confidence)})`,
+    line: `Jev decided: ${chosen} (confidence ${share(answer.confidence)})`,
   };
 }
