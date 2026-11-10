@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0 — 2026-11-10
+
+Additions for running the hook on a machine where the key lives in the
+Keychain and a local dashboard adds up what the compactions freed. All four
+are options; with none set, the ledger (sizes, no content) and the status
+line are new.
+
+- `keychainService`: a key found in neither the `apiKey` option nor
+  `TYPESAFE_API_KEY` is read from the macOS Keychain.
+- `ledgerDir` (default `~/.fast-jev/events`): one JSON file per compaction
+  outcome with counts, sizes, the estimated tokens freed and the input tokens
+  Jev reported. A skip or a fallback records nothing freed.
+- `excludePaths`: sessions running in a matching folder or repository are
+  never sent to Jev; their compactions go to the built-in summary.
+- `statusLine` (default on): a pinned line under the prompt with the context
+  percentage, the threshold and what the session's compactions freed.
+
 ## 0.5.2 — 2026-10-22
 
 Fixes from a cross-review of 0.5.1 (`codex`; `agy` returned no answer).

@@ -70,13 +70,18 @@ The plugin declares these `userConfig` values in
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
 | `logDecisions` | `false` |
+| `keychainService` | none |
+| `ledgerDir` | `~/.fast-jev/events` |
+| `excludePaths` | none |
+| `statusLine` | `true` |
 
 The TypeSafe key can be supplied as the sensitive `apiKey` plugin option or
 through `TYPESAFE_API_KEY`. The environment variable is the recommended
 development setup.
 
-Every option except `apiKey`, `compactAtPercent`, `minReductionRatio`,
-`builtinFallback`, `compactionTimeoutMs`, `model` and `logDecisions` is passed
+Every option except `apiKey`, `keychainService`, `compactAtPercent`,
+`minReductionRatio`, `builtinFallback`, `compactionTimeoutMs`, `model`,
+`logDecisions`, `ledgerDir`, `excludePaths` and `statusLine` is passed
 straight to the library; see the root README for what they do. Subagent and
 fork compactions (`agentId`) go to the next handler untouched, and a
 `precompute` is skipped. If Jev fails, the response is malformed, the key is
@@ -118,6 +123,48 @@ exercise the deadline through Claude Code's actual hook dispatcher and a
 virtual clock. The tests use synthetic messages and mocked HTTP responses
 and make no model requests. `npm test` continues to run the fast library and
 adapter tests without a Claude CLI.
+
+## Key from the Keychain, ledger, excluded folders, status line
+
+With `keychainService` set, a key found in neither the `apiKey` option nor
+`TYPESAFE_API_KEY` is read from the macOS Keychain
+(`security find-generic-password -s <service> -w`), so it has to be in no
+settings file and no shell profile:
+
+```sh
+security add-generic-password -U -s typesafe-jev -a "$USER" -w   # prompts for the key
+claude plugin configure fast-jev-compaction@lexus2016 --values-stdin <<< '{"keychainService":"typesafe-jev"}'
+```
+
+Every compaction outcome (`compacted`, `calls-removed`, `fallback`,
+`skipped`, `excluded`) is written as one JSON file under `ledgerDir`: the
+surface (`t3-code` when T3 Code started the session, else Claude Code's
+entry point such as `cli` or `sdk-ts`), the session id, the working directory's last segment, the trigger, message and
+character counts before and after, `tokensFreed` (characters / 4, an
+estimate), the decision counts, the number of Jev requests and the input
+tokens Jev reported for them (`jevTokensReported: false` marks an estimate,
+requests times the state size, when Jev reported none; a round that failed
+records none). No message text and no tool input is written, and a
+provider's error body is cut to its status (`Jev request failed (401)`).
+A skip or a fallback records `tokensFreed: 0`: nothing was installed. What
+the built-in summary then freed is not measured.
+
+A session is never sent to Jev when one of the `excludePaths` entries
+(case-insensitive, split at commas) is found in its working directory, in
+its repository's root (the main working tree's, for a worktree) or in its
+`origin` URL: the hook logs it, records an `excluded` event without the
+folder's name and hands the compaction to Claude Code's built-in summary,
+whatever `builtinFallback` says. With entries set, a session whose
+directory cannot be read counts as excluded. The check is where the session
+runs; a file read from an excluded folder in a session running elsewhere is
+not recognised, and neither is a copy of the folder under another name.
+
+`statusLine` pins one line under the prompt, refreshed at the session's
+start, after every main-agent answer and after every installed compaction
+(the percentage reappears with the next answer):
+`Jev ● armed · context 34% · compacts at 60% · freed ~120k tokens in 3 runs`.
+Headless surfaces (`-p`, the SDK) have no status line. The ledger and the
+status line wait at most two seconds for a write or the Keychain.
 
 ## Scope and caveat
 
