@@ -11,6 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
+import { decideRequest, describeDecision } from '../hooks/decide.ts';
 import { excludedBy, ledgerReason, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
@@ -134,7 +135,7 @@ describe('hook config bounds', () => {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true, decideTool: true });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no', logDecisions: true, dropCalls: true, builtinFallback: 'sometimes' }),
     ).toEqual({
@@ -143,6 +144,7 @@ describe('hook config', () => {
       ledgerDir: '~/.fast-jev/events',
       excludePaths: [],
       statusLine: true,
+      decideTool: true,
       keepThreshold: 0.3,
       maxStateTokens: 1000,
       model: 'jev-x',
@@ -922,5 +924,112 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     expect(surfaceName('cli', undefined)).toBe('cli');
     expect(surfaceName(undefined, '')).toBeUndefined();
     expect(statusText({ percent: 71, compactAtPercent: 60, runs: 2, tokensFreed: 1_250_000, hasKey: true })).toBe('Jev ● armed · context 71% · compacts at 60% · freed ~1.3M tokens in 2 runs');
+  });
+});
+
+describe('jev_decide tool', () => {
+  const TOOL = 'mcp__fast-jev-compaction__jev_decide';
+  const sleep = (_ms: number, { signal }: { signal: AbortSignal }) =>
+    new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled'))));
+
+  function decideHost(answer: unknown, overrides: Record<string, unknown> = {}) {
+    const files = new Map<string, string>();
+    const logs: string[] = [];
+    const bodies: string[] = [];
+    const registered: Array<{ name: string; description: string; inputSchema?: unknown }> = [];
+    const host = {
+      env: { get: async (name: string) => (name === 'HOME' ? '/home/me' : name === 'TYPESAFE_API_KEY' ? 'k'.repeat(16) : undefined) },
+      settings: { read: async () => ({}) },
+      http: {
+        fetch: async (_url: string, init?: { body?: string }) => {
+          bodies.push(init?.body ?? '');
+          return { status: 200, ok: true, text: JSON.stringify({ answers: { decision: answer }, usage: { input_tokens: 321 } }) };
+        },
+      },
+      ui: { log: (text: string) => logs.push(text), toast: () => {}, status: () => {} },
+      clock: { sleep },
+      fs: { write: async (path: string, text: string) => void files.set(path, text) },
+      session: { id: async () => 'session-1', cwd: async () => '/work/acme/api' },
+      tool: { register: async (tool: { name: string; description: string }) => void registered.push(tool) },
+      ...overrides,
+    };
+    return { host, files, logs, bodies, registered };
+  }
+
+  const events = (files: Map<string, string>) => [...files.values()].map((text) => JSON.parse(text));
+
+  it('is offered at the session start, unless turned off', async () => {
+    const on = decideHost({ noul: 1 });
+    expect(await registeredHooks({}).get('session.start')!(on.host, {}, async () => ({ started: true }))).toEqual({ started: true });
+    expect(on.registered).toEqual([expect.objectContaining({ name: 'jev_decide', inputSchema: expect.objectContaining({ required: ['question'] }) })]);
+    expect(on.registered[0]!.description).toMatch(/sent to TypeSafe/);
+    const off = decideHost({ noul: 1 });
+    await registeredHooks({ decideTool: false }).get('session.start')!(off.host, {}, async () => ({}));
+    expect(off.registered).toEqual([]);
+    // a host that cannot register a tool still starts
+    const broken = decideHost({ noul: 1 }, { tool: { register: async () => { throw new Error('unbound'); } } });
+    expect(await registeredHooks({}).get('session.start')!(broken.host, {}, async () => ({ started: true }))).toEqual({ started: true });
+    expect(broken.logs).toEqual(['jev_decide not offered (unbound)']);
+  });
+
+  it('answers a yes/no question from what the call carries, and records it without its text', async () => {
+    const { host, files, logs, bodies } = decideHost({ noul: 0.83 });
+    const out = await registeredHooks({}).get('tool.call')!(host, { tool: TOOL, question: 'Is the migration reversible?', context: 'It only adds a nullable column. Token: sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, async () => ({}));
+    expect(out).toEqual({ result: 'Jev: yes (probability of yes: 83%). Jev gives no reasons and saw only the question and context of this call.' });
+    expect(logs).toEqual(['Jev decided: yes (yes 83%)']);
+    expect(bodies.length).toBe(1);
+    const body = JSON.parse(bodies[0]!);
+    expect(body.state.question).toBe('Is the migration reversible?');
+    expect(body.state.context).toContain('nullable column');
+    expect(bodies[0]).not.toContain('sk-ant-api03-AAAA');
+    expect(body.questions.decision.type).toBe('noul');
+    const [event] = events(files);
+    expect(event).toMatchObject({ outcome: 'decision', kind: 'yesno', trigger: 'tool', requests: 1, jevTokens: 321, jevTokensReported: true, project: 'api' });
+    expect(JSON.stringify(event)).not.toMatch(/migration|nullable|83/i);
+  });
+
+  it('answers a multiple-choice question with every probability', async () => {
+    const { host, files, bodies } = decideHost({ choice: 'patch', confidence: 0.71, probabilities: { patch: 0.71, rewrite: 0.2, wait: 0.09 } });
+    const out = await registeredHooks({}).get('tool.call')!(host, { tool: TOOL, question: 'Which fix?', options: [{ name: 'rewrite', description: 'Start over.' }, { name: 'patch' }, 'wait'] }, async () => ({}));
+    expect(out).toEqual({ result: 'Jev: "patch" (confidence 71%). Probabilities: patch 71%, rewrite 20%, wait 9%. Jev gives no reasons and saw only the question, options and context of this call.' });
+    expect(JSON.parse(bodies[0]!).questions.decision).toEqual({ type: 'choice', instructions: 'Which fix?', criteria: { rewrite: 'Start over.', patch: null, wait: null } });
+    expect(events(files)[0]).toMatchObject({ outcome: 'decision', kind: 'choice' });
+  });
+
+  it('never fails the call: excluded folder, no key, a bad input, a provider error', async () => {
+    const call = async (host: unknown, input: Record<string, unknown>, options: Record<string, unknown> = {}) =>
+      (await registeredHooks(options).get('tool.call')!(host, { tool: TOOL, ...input }, async () => ({}))) as { result: string };
+    const excluded = decideHost({ noul: 1 }, { session: { id: async () => 's', cwd: async () => '/Users/me/KI4MED/app' } });
+    expect((await call(excluded.host, { question: 'Go?' }, { excludePaths: 'ki4med' })).result).toBe('Jev was not asked (this folder is excluded from Jev, excludePaths: ki4med). Decide without it.');
+    expect(excluded.bodies).toEqual([]);
+    expect(excluded.files.size).toBe(0);
+    const keyless = decideHost({ noul: 1 }, { env: { get: async () => undefined } });
+    expect((await call(keyless.host, { question: 'Go?' })).result).toBe('Jev was not asked (no TypeSafe key is configured). Decide without it.');
+    expect(keyless.bodies).toEqual([]);
+    const bad = decideHost({ noul: 1 });
+    expect((await call(bad.host, { question: '  ' })).result).toBe('Jev did not decide (`question` is required). Decide without it.');
+    expect((await call(bad.host, { question: 'Which?', options: [{ name: 'a' }] })).result).toMatch(/takes 2 to 8 entries/);
+    expect((await call(bad.host, { question: 'Which?', options: ['a', 'a'] })).result).toMatch(/given twice/);
+    expect(bad.bodies).toEqual([]);
+    const key = 'k'.repeat(16);
+    const failing = decideHost({ noul: 1 }, { http: { fetch: async () => ({ status: 401, ok: false, text: `bad key ${key}` }) } });
+    const failed = (await call(failing.host, { question: 'Go?' })).result;
+    expect(failed).toMatch(/^Jev did not decide \(Jev request failed \(401\)/);
+    expect(failed).not.toContain(key);
+    expect(failing.files.size).toBe(0);
+    // the wrong kind of answer is a failure, not a guess
+    const wrong = decideHost({ choice: 'x', confidence: 1, probabilities: { x: 1 } });
+    expect((await call(wrong.host, { question: 'Go?' })).result).toBe('Jev did not decide (Jev gave no yes/no answer). Decide without it.');
+    const stray = decideHost({ choice: 'c', confidence: 1, probabilities: { c: 1 } });
+    expect((await call(stray.host, { question: 'Which?', options: ['a', 'b'] })).result).toBe('Jev did not decide (Jev chose an option that was not offered). Decide without it.');
+  });
+
+  it('says so when Jev cannot tell', () => {
+    const yesno = decideRequest({ question: 'Go?' });
+    expect(describeDecision(yesno, { noul: 0.55 }).text).toBe('Jev: cannot tell (probability of yes: 55%). This is close to a coin flip: do not lean on it. Jev gives no reasons and saw only the question and context of this call.');
+    expect(describeDecision(yesno, { noul: 0.1 }).line).toBe('Jev decided: no (yes 10%)');
+    const choice = decideRequest({ question: 'Which?', options: ['a', 'b'] });
+    expect(describeDecision(choice, { choice: 'a', confidence: 0.52, probabilities: { a: 0.52, b: 0.48 } }).text).toContain('The confidence is low: do not lean on it.');
+    expect(decideRequest({ question: 'q'.repeat(5000), context: 'c'.repeat(50000) }).state).toEqual({ question: 'q'.repeat(2000), context: 'c'.repeat(20000) });
   });
 });

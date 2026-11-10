@@ -13,6 +13,7 @@ import { jevAsker, type JevFetch, type JevFetchInit, type JevFetchResponse } fro
 import { compact, dropStubbedCalls, reductionRatio, resolveOptions } from '../src/compact.js';
 import { looksOpaque, redactSecrets } from '../src/redact.js';
 import { DEFAULT_MODEL } from '../src/request.js';
+import { DECIDE_DESCRIPTION, DECIDE_SCHEMA, DECIDE_TOOL, decideRequest, describeDecision } from './decide.js';
 import {
   excludedBy,
   ledgerFileName,
@@ -53,6 +54,7 @@ const HOOK_DEFAULTS = {
   keychainService: '',
   ledgerDir: '~/.fast-jev/events',
   statusLine: true,
+  decideTool: true,
 };
 
 /**
@@ -83,6 +85,8 @@ export type HookConfig = CompactOptions & {
   excludePaths: string[];
   /** Pin a line under the prompt saying whether Jev is armed and what it freed. */
   statusLine: boolean;
+  /** Offer the model the `jev_decide` tool. */
+  decideTool: boolean;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -150,6 +154,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
     excludePaths: parseExcludePaths(optionString(options, 'excludePaths')),
     statusLine:
       typeof options['statusLine'] === 'boolean' ? options['statusLine'] : HOOK_DEFAULTS.statusLine,
+    decideTool:
+      typeof options['decideTool'] === 'boolean' ? options['decideTool'] : HOOK_DEFAULTS.decideTool,
   };
   if (config.compactionTimeoutMs <= 0) config.compactionTimeoutMs = HOOK_DEFAULTS.compactionTimeoutMs;
   // Outside (0, 100] is a mistake: 0 or less would ask for a compaction after
@@ -556,6 +562,12 @@ async function showStatus($: Host, state: Reporting): Promise<void> {
   }
 }
 
+/** The tool's name as the model calls it: `mcp__<plugin>__<name>`, the plugin's name from its manifest. */
+const DECIDE_TOOL_NAME = `mcp__fast-jev-compaction__${DECIDE_TOOL}`;
+
+/** How long one decision may take; Jev answers in well under a second. */
+const DECIDE_TIMEOUT_MS = 20_000;
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -568,7 +580,65 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.start', async ($, event, next) => {
     await bounded($, showStatus($, reporting));
-    return next(event);
+    const started = await next(event);
+    if (configured.decideTool) {
+      try {
+        await $.tool.register({ name: DECIDE_TOOL, description: DECIDE_DESCRIPTION, inputSchema: DECIDE_SCHEMA });
+      } catch (error) {
+        $.ui.log(`${DECIDE_TOOL} not offered (${error instanceof Error ? error.message : String(error)})`);
+      }
+    }
+    return started;
+  });
+
+  on('tool.call', { tool: DECIDE_TOOL_NAME }, async ($, event) => {
+    // Whatever happens, the model gets a result it can act on without Jev.
+    const unasked = (why: string) => ({ result: `Jev was not asked (${why}). Decide without it.` });
+    let secrets: string[] = [];
+    try {
+      const request = decideRequest(event as unknown as Readonly<Record<string, unknown>>);
+      const excluded = await exclusion($, configured.excludePaths);
+      if (excluded) return unasked(`this folder is excluded from Jev, excludePaths: ${excluded}`);
+      const env = await readSettingsEnv($);
+      const apiKey = await getApiKey($, configured, env);
+      if (!apiKey) return unasked('no TypeSafe key is configured');
+      secrets = [...knownSecrets(env), apiKey];
+      let jevTokens = 0;
+      const startedAt = Date.now();
+      const asker = jevAsker(
+        async (url, init) => {
+          const response = await $.http.fetch(url, init);
+          jevTokens += reportedInputTokens(response.text);
+          return { status: response.status, ok: response.ok, text: response.text };
+        },
+        apiKey,
+        configured.model,
+        undefined,
+        { known: knownSecrets(env) },
+      );
+      const response = await withCompactionDeadline(
+        () => asker.ask(request.state, request.questions),
+        DECIDE_TIMEOUT_MS,
+        (ms, sleepOptions) => $.clock.sleep(ms, sleepOptions),
+      );
+      const decision = describeDecision(request, response.answers['decision']);
+      $.ui.log(decision.line);
+      await bounded(
+        $,
+        record($, configured.ledgerDir, {
+          trigger: 'tool',
+          outcome: 'decision',
+          kind: request.kind,
+          requests: 1,
+          ...(jevTokens > 0 ? { jevTokens, jevTokensReported: true } : {}),
+          ms: Date.now() - startedAt,
+        }),
+      );
+      return { result: decision.text };
+    } catch (error) {
+      const why = redactSecrets(error instanceof Error ? error.message : String(error), secrets).text;
+      return { result: `Jev did not decide (${why.length > 300 ? `${why.slice(0, 300)}…` : why}). Decide without it.` };
+    }
   });
 
   on('session.compact', async ($, event, next) => {
