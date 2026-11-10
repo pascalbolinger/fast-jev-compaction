@@ -1,4 +1,5 @@
 import type {
+  Hook,
   On,
   PluginOptions,
   Register,
@@ -12,6 +13,18 @@ import { jevAsker, type JevFetch, type JevFetchInit, type JevFetchResponse } fro
 import { compact, dropStubbedCalls, reductionRatio, resolveOptions } from '../src/compact.js';
 import { looksOpaque, redactSecrets } from '../src/redact.js';
 import { DEFAULT_MODEL } from '../src/request.js';
+import {
+  excludedBy,
+  ledgerFileName,
+  parseExcludePaths,
+  projectName,
+  reportedInputTokens,
+  roundFields,
+  shortReason,
+  statusText,
+  tokensFreed,
+  type LedgerEvent,
+} from './ledger.js';
 import type {
   CompactOptions,
   CompactResult,
@@ -36,6 +49,9 @@ const HOOK_DEFAULTS = {
   compactionTimeoutMs: 60_000,
   logDecisions: false,
   builtinFallback: DEFAULT_BUILTIN_FALLBACK,
+  keychainService: '',
+  ledgerDir: '~/.fast-jev/events',
+  statusLine: true,
 };
 
 /**
@@ -58,6 +74,14 @@ export type HookConfig = CompactOptions & {
   compactionTimeoutMs: number;
   logDecisions: boolean;
   builtinFallback: BuiltinFallback;
+  /** macOS Keychain service holding the key (generic password); '' never asks the Keychain. */
+  keychainService: string;
+  /** Where one JSON file per compaction outcome is written; '' writes none. */
+  ledgerDir: string;
+  /** Working directories (substrings) whose sessions are never sent to Jev. */
+  excludePaths: string[];
+  /** Pin a line under the prompt saying whether Jev is armed and what it freed. */
+  statusLine: boolean;
 };
 
 function optionNumber(options: PluginOptions, key: string, fallback: number): number {
@@ -119,6 +143,12 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
         ? options['logDecisions']
         : HOOK_DEFAULTS.logDecisions,
     builtinFallback: optionFallback(options),
+    keychainService: optionString(options, 'keychainService') ?? HOOK_DEFAULTS.keychainService,
+    ledgerDir:
+      typeof options['ledgerDir'] === 'string' ? options['ledgerDir'].trim() : HOOK_DEFAULTS.ledgerDir,
+    excludePaths: parseExcludePaths(optionString(options, 'excludePaths')),
+    statusLine:
+      typeof options['statusLine'] === 'boolean' ? options['statusLine'] : HOOK_DEFAULTS.statusLine,
   };
   if (config.compactionTimeoutMs <= 0) config.compactionTimeoutMs = HOOK_DEFAULTS.compactionTimeoutMs;
   // Outside (0, 100] is a mistake: 0 or less would ask for a compaction after
@@ -352,15 +382,45 @@ export function knownSecrets(env: Readonly<Record<string, string>>): string[] {
     .map(([, value]) => value);
 }
 
+type ProcessRun = (
+  argv: readonly string[],
+  init?: { timeoutMs?: number },
+) => Promise<{ exitCode: number; stdout: string }>;
+
+/**
+ * The key from the macOS Keychain, so it has to be in no settings file and no
+ * shell profile. Anything that goes wrong (another system, no such item, a
+ * locked keychain) is the same as no key there.
+ */
+async function keychainKey(
+  $: { process: { run: ProcessRun } },
+  service: string,
+): Promise<string | undefined> {
+  if (!service) return undefined;
+  try {
+    const { exitCode, stdout } = await $.process.run(
+      ['/usr/bin/security', 'find-generic-password', '-s', service, '-w'],
+      { timeoutMs: 5_000 },
+    );
+    const key = stdout.trim();
+    return exitCode === 0 && key ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function getApiKey(
-  $: { env: { get: (name: string) => Promise<string | undefined> } },
+  $: {
+    env: { get: (name: string) => Promise<string | undefined> };
+    process: { run: ProcessRun };
+  },
   config: HookConfig,
   env: Readonly<Record<string, string>>,
 ): Promise<string | undefined> {
   if (config.apiKey) return config.apiKey;
   const fromEnv = await $.env.get('TYPESAFE_API_KEY');
   if (fromEnv) return fromEnv;
-  return env['TYPESAFE_API_KEY'] || undefined;
+  return env['TYPESAFE_API_KEY'] || (await keychainKey($, config.keychainService));
 }
 
 function notify(
@@ -376,6 +436,78 @@ function notify(
   $.ui.toast(text, { timeoutMs: 15_000 });
 }
 
+/** The engine as a `session.compact` hook is handed it. */
+type Host = Parameters<Hook<'session.compact'>>[0];
+
+/** What the status line shows of this session, besides the configuration. */
+type Reporting = {
+  config: HookConfig;
+  runs: number;
+  freed: number;
+  lastPercent?: number;
+  hasKey?: boolean;
+};
+
+/** The `excludePaths` entry this session's directory matches, if any. */
+async function exclusion($: Host, excludePaths: readonly string[]): Promise<string | undefined> {
+  if (excludePaths.length === 0) return undefined;
+  try {
+    return excludedBy(await $.session.cwd(), excludePaths);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Writes one ledger event. The ledger and the status line are reporting:
+ * neither may cost a compaction, so nothing here throws.
+ */
+async function record(
+  $: Host,
+  ledgerDir: string,
+  event: Omit<LedgerEvent, 'v' | 'ts' | 'host'>,
+): Promise<void> {
+  if (!ledgerDir) return;
+  try {
+    const home = (await $.env.get('HOME')) ?? '';
+    const dir = ledgerDir.replace(/^~(?=\/|$)/, home);
+    const ts = new Date().toISOString();
+    const entry: LedgerEvent = { v: 1, ts, host: 'claude-code', ...event };
+    try {
+      entry.session = await $.session.id();
+      entry.project = projectName(await $.session.cwd());
+    } catch {
+      // an event without them still counts
+    }
+    const nonce = Math.random().toString(36).slice(2, 8);
+    await $.fs.write(`${dir}/${ledgerFileName(ts, nonce)}`, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // unwritable ledger: the compaction stands
+  }
+}
+
+async function showStatus($: Host, state: Reporting): Promise<void> {
+  if (!state.config.statusLine) return;
+  try {
+    const excluded = await exclusion($, state.config.excludePaths);
+    if (state.hasKey === undefined && !excluded) {
+      state.hasKey = Boolean(await getApiKey($, state.config, await readSettingsEnv($)));
+    }
+    $.ui.status(
+      statusText({
+        percent: state.lastPercent,
+        compactAtPercent: state.config.compactAtPercent,
+        runs: state.runs,
+        tokensFreed: state.freed,
+        excluded,
+        hasKey: state.hasKey ?? false,
+      }),
+    );
+  } catch {
+    // a surface without a status line
+  }
+}
+
 export const register: Register = (on: On, options: PluginOptions) => {
   const configured = resolveHookConfig(options);
   let compacting = false;
@@ -384,22 +516,42 @@ export const register: Register = (on: On, options: PluginOptions) => {
   let headless = false;
   // After a skipped turn.complete request, the context percent to wait for.
   let retryAtPercent = 0;
+  const reporting: Reporting = { config: configured, runs: 0, freed: 0 };
+
+  on('session.start', async ($, event, next) => {
+    await showStatus($, reporting);
+    return next(event);
+  });
 
   on('session.compact', async ($, event, next) => {
     if (event.agentId) return next(event);
     if (event.trigger === 'precompute') {
       return { skip: 'fast-jev-compaction does not handle speculative compactions' };
     }
+    const excluded = await exclusion($, configured.excludePaths);
+    if (excluded) {
+      // Nothing of this session goes to Jev; the built-in compaction involves
+      // only the model provider the session already talks to.
+      $.ui.log(`not sent to Jev: this folder is excluded (excludePaths: ${excluded})`);
+      await record($, configured.ledgerDir, { trigger: event.trigger, outcome: 'excluded', reason: `excludePaths: ${excluded}` });
+      return next(event);
+    }
+    // The sizes of the round, once Jev has answered, for whatever outcome follows.
+    let round: Partial<LedgerEvent> = {};
     // The API key and the secret `settings.env` values, once read: an error body
     // from the provider can echo them, and a skip lands in the transcript.
     let secrets: string[] = [];
-    const giveUp = (reported: string) => {
+    const giveUp = async (reported: string) => {
       const why = redactSecrets(reported, secrets).text;
+      // Nothing was installed, so nothing was freed, whatever the round measured.
+      const sizes = { ...round, messagesAfter: round.messagesBefore, charsAfter: round.charsBefore, tokensFreed: 0 };
       if (mayUseBuiltin(event.trigger, configured.builtinFallback)) {
         notify($, `fallback to built-in summary (${why})`);
+        await record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'fallback', reason: shortReason(why) });
         return next(event);
       }
       notify($, `not compacted, no built-in summary (${why})`);
+      await record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'skipped', reason: shortReason(why) });
       const reason = why.length > 200 ? `${why.slice(0, 200)}…` : why;
       return { skip: `fast-jev-compaction: ${reason}; conversation left unchanged` };
     };
@@ -412,12 +564,14 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const detail = (outcome: CompactResult) =>
         config.logDecisions ? summarize(outcome) : `${percent(reductionRatio(outcome))} reduction`;
       let redacted = 0;
+      let jevTokens = 0;
       const { result, messages } = await withCompactionDeadline(
         (signal) => compactSession(
           event.messages,
           config,
           async (url, init) => {
             const response = await $.http.fetch(url, init);
+            jevTokens += reportedInputTokens(response.text);
             return { status: response.status, ok: response.ok, text: response.text };
           },
           (count) => {
@@ -430,6 +584,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
         (ms, options) => $.clock.sleep(ms, options),
         next.signal,
       );
+      round = roundFields(result, jevTokens);
+      const installed = async (outcome: CompactResult, kind: 'compacted' | 'calls-removed') => {
+        reporting.runs += 1;
+        reporting.freed += tokensFreed(outcome);
+        await record($, configured.ledgerDir, { ...roundFields(outcome, jevTokens), trigger: event.trigger, outcome: kind });
+        await showStatus($, reporting);
+      };
       if (config.logDecisions) {
         if (redacted > 0) $.ui.log(`redacted ${redacted} secret-shaped value(s) from the Jev request`);
         for (const line of decisionLogLines(result)) $.ui.log(line);
@@ -448,6 +609,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
               $,
               `kept ${kept.length}/${event.messages.length} messages, no summary; stubs alone freed ${percent(reductionRatio(result))}, so ${result.stats.callsStubbed} unneeded calls were removed (${detail(dropped)})`,
             );
+            await installed(dropped, 'calls-removed');
             return { messages: kept };
           }
           shortfall += `; ${percent(reductionRatio(dropped))} with the unneeded calls removed`;
@@ -458,6 +620,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
         $,
         `kept ${messages.length}/${event.messages.length} messages, no summary (${detail(result)})`,
       );
+      await installed(result, 'compacted');
       return { messages };
     } catch (error) {
       return giveUp(error instanceof Error ? error.message : String(error));
@@ -481,6 +644,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const { context } = await $.session.usage();
       const used = context.percent ?? 0;
+      reporting.lastPercent = used;
+      await showStatus($, reporting);
       if (used < configured.compactAtPercent) retryAtPercent = 0;
       if (used < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       const { skip } = await $.session.compact();

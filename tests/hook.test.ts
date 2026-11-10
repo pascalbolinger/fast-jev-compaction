@@ -11,6 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
+import { excludedBy, parseExcludePaths, reportedInputTokens, statusText } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
@@ -133,11 +134,15 @@ describe('hook config bounds', () => {
 
 describe('hook config', () => {
   it('reads userConfig values and falls back to defaults', () => {
-    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto' });
+    expect(resolveHookConfig({})).toEqual({ compactAtPercent: 60, minReductionRatio: 0.25, model: 'jev-latest', compactionTimeoutMs: 60000, logDecisions: false, builtinFallback: 'auto', keychainService: '', ledgerDir: '~/.fast-jev/events', excludePaths: [], statusLine: true });
     expect(
       resolveHookConfig({ apiKey: 'k', keepThreshold: 0.3, maxStateTokens: 1000, model: 'jev-x', goal: 'g', compactAtPercent: 'no', logDecisions: true, dropCalls: true, builtinFallback: 'sometimes' }),
     ).toEqual({
       apiKey: 'k',
+      keychainService: '',
+      ledgerDir: '~/.fast-jev/events',
+      excludePaths: [],
+      statusLine: true,
       keepThreshold: 0.3,
       maxStateTokens: 1000,
       model: 'jev-x',
@@ -730,5 +735,116 @@ describe('what reaches Jev', () => {
     await compactSession(messages, config, jevFetch(() => 0.9, bodies));
     expect(bodies.length).toBeGreaterThan(0);
     for (const body of bodies) expect(body).not.toContain(password);
+  });
+});
+
+describe('ledger, Keychain key, excluded folders and status line', () => {
+  const sleep = (_ms: number, { signal }: { signal: AbortSignal }) =>
+    new Promise<void>((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('cancelled'))));
+
+  function reportingHost(overrides: Record<string, unknown> = {}) {
+    const files = new Map<string, string>();
+    const status: Array<string | undefined> = [];
+    const logs: string[] = [];
+    const bodies: string[] = [];
+    const host = {
+      env: { get: async (name: string) => (name === 'HOME' ? '/home/me' : name === 'TYPESAFE_API_KEY' ? 'k'.repeat(16) : undefined) },
+      settings: { read: async () => ({}) },
+      http: { fetch: jevFetch(() => 0.1, bodies) },
+      ui: { log: (text: string) => logs.push(text), toast: () => {}, status: (text: string | undefined) => status.push(text) },
+      clock: { sleep },
+      fs: { write: async (path: string, text: string) => void files.set(path, text) },
+      session: { id: async () => 'session-1', cwd: async () => '/work/acme/api' },
+      ...overrides,
+    };
+    return { host, files, status, logs, bodies };
+  }
+
+  const events = (files: Map<string, string>) => [...files.values()].map((text) => JSON.parse(text));
+
+  it('writes one event with sizes and no content for an installed compaction', async () => {
+    const { host, files, status } = reportingHost();
+    await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }));
+    expect([...files.keys()]).toEqual([expect.stringMatching(/^\/home\/me\/\.fast-jev\/events\/\d{8}T\d{9}Z-[a-z0-9]+\.json$/)]);
+    const [event] = events(files);
+    expect(event).toMatchObject({ v: 1, host: 'claude-code', session: 'session-1', project: 'api', trigger: 'manual', outcome: 'compacted', requests: 1 });
+    expect(event.tokensFreed).toBe(Math.round((event.charsBefore - event.charsAfter) / 4));
+    expect(event.tokensFreed).toBeGreaterThan(0);
+    for (const m of transcript()) for (const r of m.toolResults ?? []) if (r.text.length > 20) expect(JSON.stringify(event)).not.toContain(r.text);
+    expect(status.at(-1)).toMatch(/^Jev ● armed · compacts at 60% · freed ~\d+k? tokens in 1 run$/);
+  });
+
+  it('records a skip as freeing nothing, with the reason', async () => {
+    const { host, files } = reportingHost({ http: { fetch: jevFetch(() => 0.9) } });
+    await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }));
+    const [event] = events(files);
+    expect(event).toMatchObject({ outcome: 'skipped', tokensFreed: 0, reason: expect.stringMatching(/^below 25% minimum/) });
+    expect(event.charsAfter).toBe(event.charsBefore);
+  });
+
+  it('never has the key in a recorded failure', async () => {
+    const key = 'k'.repeat(16);
+    const { host, files } = reportingHost({ http: { fetch: async () => ({ status: 401, ok: false, text: `bad key ${key}` }) } });
+    await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(host, { trigger: 'auto', messages: transcript() }, async () => ({ messages: [] }));
+    const [event] = events(files);
+    expect(event.outcome).toBe('fallback');
+    expect(JSON.stringify(event)).not.toContain(key);
+  });
+
+  it('sends nothing to Jev from an excluded folder and delegates to the built-in compaction', async () => {
+    const { host, files, bodies, logs, status } = reportingHost({ session: { id: async () => 's', cwd: async () => '/Users/me/01 Clients/Acme' } });
+    const hooks = registeredHooks({ preserveRecentMessages: 1, excludePaths: 'KI4MED, 01 clients' });
+    let delegated = false;
+    const out = await hooks.get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => {
+      delegated = true;
+      return { messages: [] };
+    });
+    expect(delegated).toBe(true);
+    expect(out).toEqual({ messages: [] });
+    expect(bodies).toEqual([]);
+    expect(events(files)).toEqual([expect.objectContaining({ outcome: 'excluded', reason: 'excludePaths: 01 clients' })]);
+    expect(logs).toEqual(['not sent to Jev: this folder is excluded (excludePaths: 01 clients)']);
+    await hooks.get('session.start')!(host, {}, async () => ({}));
+    expect(status.at(-1)).toBe('Jev ○ off in this folder (excludePaths: 01 clients)');
+  });
+
+  it('reads the key from the Keychain only when nothing else has it', async () => {
+    const run = vi.fn(async () => ({ exitCode: 0, stdout: 'from-keychain-0123456789\n' }));
+    const { host, bodies, files } = reportingHost({ env: { get: async () => undefined }, process: { run } });
+    const headers: Array<Record<string, string>> = [];
+    host.http.fetch = async (url: string, init: { headers?: Record<string, string>; body?: string }) => {
+      headers.push(init.headers ?? {});
+      return jevFetch(() => 0.1, bodies)(url, init as never);
+    };
+    await registeredHooks({ preserveRecentMessages: 1, keychainService: 'typesafe-jev', ledgerDir: '' }).get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }));
+    expect(run).toHaveBeenCalledWith(['/usr/bin/security', 'find-generic-password', '-s', 'typesafe-jev', '-w'], { timeoutMs: 5000 });
+    expect(JSON.stringify(headers)).toContain('from-keychain-0123456789');
+    expect(files.size).toBe(0);
+
+    const unused = vi.fn(async () => ({ exitCode: 0, stdout: 'x' }));
+    const second = reportingHost({ process: { run: unused } });
+    await registeredHooks({ preserveRecentMessages: 1, keychainService: 'typesafe-jev' }).get('session.compact')!(second.host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }));
+    expect(unused).not.toHaveBeenCalled();
+  });
+
+  it('shows the context and the threshold after an answer, and says when there is no key', async () => {
+    const { host, status } = reportingHost({ session: { usage: async () => ({ context: { percent: 34.4 } }), compact: vi.fn(), cwd: async () => '/work', id: async () => 's' } });
+    await registeredHooks({}).get('turn.complete')!(host, { reason: 'answer' }, async () => ({}));
+    expect(status).toEqual(['Jev ● armed · context 34% · compacts at 60% · nothing compacted yet']);
+    const keyless = reportingHost({ env: { get: async () => undefined } });
+    await registeredHooks({}).get('session.start')!(keyless.host, {}, async () => ({}));
+    expect(keyless.status).toEqual(['Jev ○ no TypeSafe key: built-in summary only']);
+    const off = reportingHost();
+    await registeredHooks({ statusLine: false }).get('session.start')!(off.host, {}, async () => ({}));
+    expect(off.status).toEqual([]);
+  });
+
+  it('parses its small inputs', () => {
+    expect(parseExcludePaths(' a, b\n\n c ,')).toEqual(['a', 'b', 'c']);
+    expect(excludedBy('/x/KI4MED/y', ['ki4med'])).toBe('ki4med');
+    expect(excludedBy('/x/y', ['ki4med'])).toBeUndefined();
+    expect(reportedInputTokens('{"usage":{"input_tokens":1234}}')).toBe(1234);
+    expect(reportedInputTokens('not json')).toBe(0);
+    expect(statusText({ percent: 71, compactAtPercent: 60, runs: 2, tokensFreed: 1_250_000, hasKey: true })).toBe('Jev ● armed · context 71% · compacts at 60% · freed ~1.3M tokens in 2 runs');
   });
 });

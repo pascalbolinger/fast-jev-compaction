@@ -1,6 +1,6 @@
 {
   "name": "fast-jev-compaction",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Verbatim Jev-guided compaction for Claude Code sessions: stale tool outputs become a note, every call and message stays word for word. Maintained fork of tamaratran/fast-jev-compaction.",
   "license": "MIT",
   "userConfig": {
@@ -9,6 +9,12 @@
       "title": "TypeSafe API key",
       "description": "TypeSafe API key. Leave unset to use TYPESAFE_API_KEY.",
       "sensitive": true
+    },
+    "keychainService": {
+      "type": "string",
+      "title": "macOS Keychain service",
+      "description": "Generic-password service in the macOS Keychain to read the TypeSafe key from when neither the apiKey option nor TYPESAFE_API_KEY has it. Unset: the Keychain is never asked.",
+      "default": ""
     },
     "keepThreshold": {
       "type": "number",
@@ -81,6 +87,24 @@
       "title": "Verbose log",
       "description": "After each compaction, also log the per-reason counts, the Jev state size, the number of redacted values and a decisions: line with Jev's keep probabilities for every tool call. Off: one line with the reduction only.",
       "default": false
+    },
+    "ledgerDir": {
+      "type": "string",
+      "title": "Ledger directory",
+      "description": "Directory that gets one small JSON file per compaction outcome (sizes and counts only, no conversation content), for a dashboard to add up. Empty writes none.",
+      "default": "~/.fast-jev/events"
+    },
+    "excludePaths": {
+      "type": "string",
+      "title": "Excluded folders",
+      "description": "Comma-separated substrings of a working directory. A session running in a matching folder is never sent to Jev: its compactions go to Claude Code's built-in summary.",
+      "default": ""
+    },
+    "statusLine": {
+      "type": "boolean",
+      "title": "Status line",
+      "description": "Pin a line under the prompt after every answer: whether Jev is armed, the context percentage, the compaction threshold and what this session's compactions freed.",
+      "default": true
     }
   },
   "author": {
