@@ -17,7 +17,7 @@ function transcript(): SessionMessage[] {
 
 function host(on: On, noul: number) {
   mock.clock(on);
-  mock.env(on, { TYPESAFE_API_KEY: 'test-key', HOME: '/home/me' });
+  mock.env(on, { TYPESAFE_API_KEY: 'test-key', HOME: '/home/me', CLAUDE_CODE_ENTRYPOINT: 'sdk-ts', T3CODE_CLI_PATH: '/t3/cli' });
   const seen = { files: [] as Array<{ path: string; text: string }>, status: [] as Array<string | undefined>, summaries: 0 };
   on('ui.log', () => ({ value: undefined }));
   on('ui.toast', () => ({ value: undefined }));
@@ -59,6 +59,7 @@ test('an installed compaction is written to the ledger and shown on the status l
   const event = JSON.parse(seen.files[0]!.text);
   expect(event.outcome).toBe('compacted');
   expect(event.session).toBe('session-1');
+  expect(event.surface).toBe('t3-code');
   expect(event.project).toBe('api');
   expect(event.jevTokens).toBe(4321);
   expect(event.tokensFreed).toBe(Math.round((event.charsBefore - event.charsAfter) / 4));

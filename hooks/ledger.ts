@@ -12,6 +12,8 @@ export type LedgerEvent = {
   v: 1;
   ts: string;
   host: string;
+  /** Where the session runs: `t3-code`, or Claude Code's entry point (`cli`, `sdk-ts`, ...). */
+  surface?: string;
   session?: string;
   project?: string;
   trigger: string;
@@ -87,6 +89,12 @@ export function parseExcludePaths(value: string | undefined): string[] {
 export function excludedBy(cwd: string, excludePaths: readonly string[]): string | undefined {
   const lower = cwd.toLowerCase();
   return excludePaths.find((part) => lower.includes(part.toLowerCase()));
+}
+
+/** The surface a session runs on, from what its environment says. */
+export function surfaceName(entrypoint: string | undefined, t3CliPath: string | undefined): string | undefined {
+  if (t3CliPath) return 't3-code';
+  return entrypoint ? entrypoint.slice(0, 40) : undefined;
 }
 
 export function projectName(cwd: string): string {

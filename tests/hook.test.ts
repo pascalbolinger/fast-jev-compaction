@@ -11,7 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
-import { excludedBy, parseExcludePaths, reportedInputTokens, statusText } from '../hooks/ledger.ts';
+import { excludedBy, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
@@ -845,6 +845,9 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     expect(excludedBy('/x/y', ['ki4med'])).toBeUndefined();
     expect(reportedInputTokens('{"usage":{"input_tokens":1234}}')).toBe(1234);
     expect(reportedInputTokens('not json')).toBe(0);
+    expect(surfaceName('sdk-ts', '/Applications/T3/cli')).toBe('t3-code');
+    expect(surfaceName('cli', undefined)).toBe('cli');
+    expect(surfaceName(undefined, '')).toBeUndefined();
     expect(statusText({ percent: 71, compactAtPercent: 60, runs: 2, tokensFreed: 1_250_000, hasKey: true })).toBe('Jev ● armed · context 71% · compacts at 60% · freed ~1.3M tokens in 2 runs');
   });
 });

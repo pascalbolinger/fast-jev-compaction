@@ -138,7 +138,8 @@ claude plugin configure fast-jev-compaction@lexus2016 --values-stdin <<< '{"keyc
 
 Every compaction outcome (`compacted`, `calls-removed`, `fallback`,
 `skipped`, `excluded`) is written as one JSON file under `ledgerDir`: the
-session id, the working directory's last segment, the trigger, message and
+surface (`t3-code` when T3 Code started the session, else Claude Code's
+entry point such as `cli` or `sdk-ts`), the session id, the working directory's last segment, the trigger, message and
 character counts before and after, `tokensFreed` (characters / 4, an
 estimate), the decision counts, the number of Jev requests and the input
 tokens Jev reported for them. No message text and no tool input is written.

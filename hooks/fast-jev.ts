@@ -22,6 +22,7 @@ import {
   roundFields,
   shortReason,
   statusText,
+  surfaceName,
   tokensFreed,
   type LedgerEvent,
 } from './ledger.js';
@@ -473,6 +474,8 @@ async function record(
     const dir = ledgerDir.replace(/^~(?=\/|$)/, home);
     const ts = new Date().toISOString();
     const entry: LedgerEvent = { v: 1, ts, host: 'claude-code', ...event };
+    const surface = surfaceName(await $.env.get('CLAUDE_CODE_ENTRYPOINT'), await $.env.get('T3CODE_CLI_PATH'));
+    if (surface) entry.surface = surface;
     try {
       entry.session = await $.session.id();
       entry.project = projectName(await $.session.cwd());
