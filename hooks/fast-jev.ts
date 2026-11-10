@@ -628,7 +628,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // a reminder that cannot be attached: the prompt goes in as it is
     }
     return next(event);
-  });
+  }).catch((_$, event, next) => next(event)); // a hook that overran its budget must not hold the prompt back
 
   on('tool.call', { tool: DECIDE_TOOL_NAME }, async ($, event) => {
     // Whatever happens, the model gets a result it can act on without Jev.
@@ -688,7 +688,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const why = redactSecrets(error instanceof Error ? error.message : String(error), secrets).text;
       return { result: `Jev did not decide (${why.length > 300 ? `${why.slice(0, 300)}…` : why}). Decide without it.` };
     }
-  });
+  }).catch(() => ({ result: 'Jev did not decide (the tool ran out of time). Decide without it.' }));
 
   on('session.compact', async ($, event, next) => {
     if (event.agentId) return next(event);
