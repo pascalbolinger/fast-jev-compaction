@@ -97,13 +97,13 @@
     "excludePaths": {
       "type": "string",
       "title": "Excluded folders",
-      "description": "Comma-separated substrings of a working directory. A session running in a matching folder is never sent to Jev: its compactions go to Claude Code's built-in summary.",
+      "description": "Comma-separated substrings. A session whose working directory, repository root or origin URL contains one is never sent to Jev: its compactions go to Claude Code's built-in summary.",
       "default": ""
     },
     "statusLine": {
       "type": "boolean",
       "title": "Status line",
-      "description": "Pin a line under the prompt after every answer: whether Jev is armed, the context percentage, the compaction threshold and what this session's compactions freed.",
+      "description": "Pin a line under the prompt, refreshed after every answer: whether Jev is armed, the context percentage, the compaction threshold and what this session's compactions freed.",
       "default": true
     }
   },

@@ -11,7 +11,7 @@ import {
   toSessionMessages,
   withCompactionDeadline,
 } from '../hooks/fast-jev.ts';
-import { excludedBy, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
+import { excludedBy, ledgerReason, parseExcludePaths, reportedInputTokens, statusText, surfaceName } from '../hooks/ledger.ts';
 import { applyDecisions, collectToolCalls, decideCall, type Message } from '../src/index.js';
 
 type SessionMessage = Message & { handle?: string };
@@ -787,7 +787,7 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     const { host, files } = reportingHost({ http: { fetch: async () => ({ status: 401, ok: false, text: `bad key ${key}` }) } });
     await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(host, { trigger: 'auto', messages: transcript() }, async () => ({ messages: [] }));
     const [event] = events(files);
-    expect(event.outcome).toBe('fallback');
+    expect(event).toMatchObject({ outcome: 'fallback', reason: 'Jev request failed (401)' });
     expect(JSON.stringify(event)).not.toContain(key);
   });
 
@@ -802,10 +802,58 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     expect(delegated).toBe(true);
     expect(out).toEqual({ messages: [] });
     expect(bodies).toEqual([]);
-    expect(events(files)).toEqual([expect.objectContaining({ outcome: 'excluded', reason: 'excludePaths: 01 clients' })]);
+    expect(events(files)).toEqual([expect.objectContaining({ outcome: 'excluded', reason: 'excludePaths' })]);
+    expect(JSON.stringify(events(files))).not.toMatch(/acme|clients/i);
     expect(logs).toEqual(['not sent to Jev: this folder is excluded (excludePaths: 01 clients)']);
     await hooks.get('session.start')!(host, {}, async () => ({}));
     expect(status.at(-1)).toBe('Jev ○ off in this folder (excludePaths: 01 clients)');
+  });
+
+  it('excludes by the repository root and the origin URL too, and when the directory is unknown', async () => {
+    const run = async (session: Record<string, unknown>) => {
+      const { host, bodies, logs } = reportingHost({ session: { id: async () => 's', ...session } });
+      let delegated = false;
+      await registeredHooks({ preserveRecentMessages: 1, excludePaths: 'ki4med' }).get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => {
+        delegated = true;
+        return { messages: [] };
+      });
+      return { sent: bodies.length, delegated, logs };
+    };
+    // a worktree: the directory says nothing, the main working tree does
+    expect(await run({ cwd: async () => '/Users/me/.t3/worktrees/a1b2', repo: async () => ({ root: '/Users/me/Projects/KI4MED', remote: null }) })).toMatchObject({ sent: 0, delegated: true });
+    expect(await run({ cwd: async () => '/tmp/x', repo: async () => ({ root: '/tmp/x', remote: 'https://github.com/someone/ki4med.git' }) })).toMatchObject({ sent: 0, delegated: true });
+    expect(await run({ cwd: async () => { throw new Error('gone'); } })).toEqual({ sent: 0, delegated: true, logs: ['not sent to Jev: this folder is excluded (excludePaths: working directory unknown)'] });
+    // elsewhere, with a repository that cannot be read: sent as usual
+    expect(await run({ cwd: async () => '/work/other', repo: async () => { throw new Error('no git'); } })).toMatchObject({ sent: 1, delegated: false });
+  });
+
+  it('installs the compaction when the ledger cannot be written or never answers', async () => {
+    const failing = reportingHost({ fs: { write: async () => { throw new Error('EACCES'); } } });
+    expect(await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(failing.host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }))).toMatchObject({ messages: expect.any(Array) });
+    // a write that hangs is left behind once the reporting budget has passed
+    const hanging = reportingHost({ fs: { write: () => new Promise<void>(() => {}) }, clock: { sleep: (ms: number, options: { signal: AbortSignal }) => (ms === 2000 ? Promise.resolve() : sleep(ms, options)) } });
+    expect(await registeredHooks({ preserveRecentMessages: 1 }).get('session.compact')!(hanging.host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }))).toMatchObject({ messages: expect.any(Array) });
+  });
+
+  it('records what removing the calls freed, and nothing for a round that was not installed', async () => {
+    const compactAt = async (minReductionRatio: number) => {
+      const { host, files } = reportingHost();
+      await registeredHooks({ preserveRecentMessages: 1, minReductionRatio }).get('session.compact')!(host, { trigger: 'manual', messages: transcript() }, async () => ({ messages: [] }));
+      return events(files)[0];
+    };
+    const stubbed = await compactAt(0);
+    expect(stubbed.outcome).toBe('compacted');
+    const ratio = (stubbed.charsBefore - stubbed.charsAfter) / stubbed.charsBefore;
+    // just above what the stubs free: the same answers, the calls removed
+    const removed = await compactAt(ratio + 0.01);
+    expect(removed.outcome).toBe('calls-removed');
+    expect(removed.tokensFreed).toBeGreaterThan(stubbed.tokensFreed);
+    expect(removed.tokensFreed).toBe(Math.round((removed.charsBefore - removed.charsAfter) / 4));
+    // out of reach either way: Jev was asked and measured a reduction, nothing was installed
+    const skipped = await compactAt(0.99);
+    expect(skipped).toMatchObject({ outcome: 'skipped', tokensFreed: 0, requests: 1 });
+    expect(skipped.charsAfter).toBe(skipped.charsBefore);
+    expect(skipped.charsBefore).toBe(stubbed.charsBefore);
   });
 
   it('reads the key from the Keychain only when nothing else has it', async () => {
@@ -831,6 +879,14 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     const { host, status } = reportingHost({ session: { usage: async () => ({ context: { percent: 34.4 } }), compact: vi.fn(), cwd: async () => '/work', id: async () => 's' } });
     await registeredHooks({}).get('turn.complete')!(host, { reason: 'answer' }, async () => ({}));
     expect(status).toEqual(['Jev ● armed · context 34% · compacts at 60% · nothing compacted yet']);
+    // a key that turns up later is found: only a found key is remembered
+    let key: string | undefined;
+    const late = reportingHost({ env: { get: async (name: string) => (name === 'TYPESAFE_API_KEY' ? key : undefined) } });
+    const hooks = registeredHooks({});
+    await hooks.get('session.start')!(late.host, {}, async () => ({}));
+    key = 'k'.repeat(16);
+    await hooks.get('session.start')!(late.host, {}, async () => ({}));
+    expect(late.status).toEqual(['Jev ○ no TypeSafe key: built-in summary only', 'Jev ● armed · compacts at 60% · nothing compacted yet']);
     const keyless = reportingHost({ env: { get: async () => undefined } });
     await registeredHooks({}).get('session.start')!(keyless.host, {}, async () => ({}));
     expect(keyless.status).toEqual(['Jev ○ no TypeSafe key: built-in summary only']);
@@ -843,6 +899,11 @@ describe('ledger, Keychain key, excluded folders and status line', () => {
     expect(parseExcludePaths(' a, b\n\n c ,')).toEqual(['a', 'b', 'c']);
     expect(excludedBy('/x/KI4MED/y', ['ki4med'])).toBe('ki4med');
     expect(excludedBy('/x/y', ['ki4med'])).toBeUndefined();
+    expect(excludedBy('/x/Bu\u0308ro/y', ['B\u00fcro'])).toBe('B\u00fcro');
+    expect(ledgerReason('below 25% minimum: 8% reduction; 12% with the unneeded calls removed')).toBe('below 25% minimum: 8% reduction; 12% with the unneeded calls removed');
+    expect(ledgerReason('Jev request failed (500): {"echo":"the user said hello"}')).toBe('Jev request failed (500)');
+    expect(ledgerReason('below 25% minimum: "quoted text"')).toBe('error');
+    expect(ledgerReason('something else entirely')).toBe('error');
     expect(reportedInputTokens('{"usage":{"input_tokens":1234}}')).toBe(1234);
     expect(reportedInputTokens('not json')).toBe(0);
     expect(surfaceName('sdk-ts', '/Applications/T3/cli')).toBe('t3-code');

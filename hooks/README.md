@@ -142,20 +142,29 @@ surface (`t3-code` when T3 Code started the session, else Claude Code's
 entry point such as `cli` or `sdk-ts`), the session id, the working directory's last segment, the trigger, message and
 character counts before and after, `tokensFreed` (characters / 4, an
 estimate), the decision counts, the number of Jev requests and the input
-tokens Jev reported for them. No message text and no tool input is written.
+tokens Jev reported for them (`jevTokensReported: false` marks an estimate,
+requests times the state size, when Jev reported none; a round that failed
+records none). No message text and no tool input is written, and a
+provider's error body is cut to its status (`Jev request failed (401)`).
 A skip or a fallback records `tokensFreed: 0`: nothing was installed. What
 the built-in summary then freed is not measured.
 
-A session whose working directory contains one of the `excludePaths`
-entries (case-insensitive) is never sent to Jev: the hook logs it, records
-an `excluded` event and hands the compaction to Claude Code's built-in
-summary. The check is the session's directory only; a file read from an
-excluded folder in a session running elsewhere is not recognised.
+A session is never sent to Jev when one of the `excludePaths` entries
+(case-insensitive, split at commas) is found in its working directory, in
+its repository's root (the main working tree's, for a worktree) or in its
+`origin` URL: the hook logs it, records an `excluded` event without the
+folder's name and hands the compaction to Claude Code's built-in summary,
+whatever `builtinFallback` says. With entries set, a session whose
+directory cannot be read counts as excluded. The check is where the session
+runs; a file read from an excluded folder in a session running elsewhere is
+not recognised, and neither is a copy of the folder under another name.
 
 `statusLine` pins one line under the prompt, refreshed at the session's
-start, after every main-agent answer and after every compaction:
+start, after every main-agent answer and after every installed compaction
+(the percentage reappears with the next answer):
 `Jev ● armed · context 34% · compacts at 60% · freed ~120k tokens in 3 runs`.
-Headless surfaces (`-p`, the SDK) have no status line.
+Headless surfaces (`-p`, the SDK) have no status line. The ledger and the
+status line wait at most two seconds for a write or the Keychain.
 
 ## Scope and caveat
 

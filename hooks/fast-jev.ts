@@ -16,11 +16,11 @@ import { DEFAULT_MODEL } from '../src/request.js';
 import {
   excludedBy,
   ledgerFileName,
+  ledgerReason,
   parseExcludePaths,
   projectName,
   reportedInputTokens,
   roundFields,
-  shortReason,
   statusText,
   surfaceName,
   tokensFreed,
@@ -449,13 +449,56 @@ type Reporting = {
   hasKey?: boolean;
 };
 
-/** The `excludePaths` entry this session's directory matches, if any. */
+/**
+ * The `excludePaths` entry this session matches, if any: in its directory, in
+ * its repository's root (the main working tree's, for a worktree) or in the
+ * `origin` URL. A directory that cannot be read counts as excluded: with
+ * folders to keep from Jev, not knowing where the session runs is no reason
+ * to send it.
+ */
 async function exclusion($: Host, excludePaths: readonly string[]): Promise<string | undefined> {
   if (excludePaths.length === 0) return undefined;
+  const places: string[] = [];
   try {
-    return excludedBy(await $.session.cwd(), excludePaths);
+    places.push(await $.session.cwd());
   } catch {
-    return undefined;
+    return 'working directory unknown';
+  }
+  try {
+    const repo = await $.session.repo();
+    if (repo) places.push(repo.root, repo.remote ?? '');
+  } catch {
+    // no repository to go by: the directory alone decides
+  }
+  for (const place of places) {
+    const entry = excludedBy(place, excludePaths);
+    if (entry) return entry;
+  }
+  return undefined;
+}
+
+/** How long a compaction or a session start waits for the ledger or the status line. */
+const REPORTING_BUDGET_MS = 2_000;
+
+/**
+ * Waits for `work` (a ledger write, a status refresh), but no longer than the
+ * budget: a write that hangs or a Keychain that does not answer is left behind
+ * instead of holding up the session.
+ */
+async function bounded($: Host, work: Promise<void>): Promise<void> {
+  const timer = new AbortController();
+  let budget: Promise<void>;
+  try {
+    budget = $.clock.sleep(REPORTING_BUDGET_MS, { signal: timer.signal }).catch(() => undefined);
+  } catch {
+    // a host without a clock: the work is all there is to wait for
+    await work;
+    return;
+  }
+  try {
+    await Promise.race([work, budget]);
+  } finally {
+    timer.abort();
   }
 }
 
@@ -478,7 +521,8 @@ async function record(
     if (surface) entry.surface = surface;
     try {
       entry.session = await $.session.id();
-      entry.project = projectName(await $.session.cwd());
+      // An excluded folder is not named either.
+      if (event.outcome !== 'excluded') entry.project = projectName(await $.session.cwd());
     } catch {
       // an event without them still counts
     }
@@ -493,7 +537,8 @@ async function showStatus($: Host, state: Reporting): Promise<void> {
   if (!state.config.statusLine) return;
   try {
     const excluded = await exclusion($, state.config.excludePaths);
-    if (state.hasKey === undefined && !excluded) {
+    // Only a key that was found is remembered: one missing now may be there later.
+    if (!state.hasKey && !excluded) {
       state.hasKey = Boolean(await getApiKey($, state.config, await readSettingsEnv($)));
     }
     $.ui.status(
@@ -522,7 +567,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
   const reporting: Reporting = { config: configured, runs: 0, freed: 0 };
 
   on('session.start', async ($, event, next) => {
-    await showStatus($, reporting);
+    await bounded($, showStatus($, reporting));
     return next(event);
   });
 
@@ -536,7 +581,7 @@ export const register: Register = (on: On, options: PluginOptions) => {
       // Nothing of this session goes to Jev; the built-in compaction involves
       // only the model provider the session already talks to.
       $.ui.log(`not sent to Jev: this folder is excluded (excludePaths: ${excluded})`);
-      await record($, configured.ledgerDir, { trigger: event.trigger, outcome: 'excluded', reason: `excludePaths: ${excluded}` });
+      await bounded($, record($, configured.ledgerDir, { trigger: event.trigger, outcome: 'excluded', reason: 'excludePaths' }));
       return next(event);
     }
     // The sizes of the round, once Jev has answered, for whatever outcome follows.
@@ -550,11 +595,11 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const sizes = { ...round, messagesAfter: round.messagesBefore, charsAfter: round.charsBefore, tokensFreed: 0 };
       if (mayUseBuiltin(event.trigger, configured.builtinFallback)) {
         notify($, `fallback to built-in summary (${why})`);
-        await record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'fallback', reason: shortReason(why) });
+        await bounded($, record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'fallback', reason: ledgerReason(why) }));
         return next(event);
       }
       notify($, `not compacted, no built-in summary (${why})`);
-      await record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'skipped', reason: shortReason(why) });
+      await bounded($, record($, configured.ledgerDir, { ...sizes, trigger: event.trigger, outcome: 'skipped', reason: ledgerReason(why) }));
       const reason = why.length > 200 ? `${why.slice(0, 200)}…` : why;
       return { skip: `fast-jev-compaction: ${reason}; conversation left unchanged` };
     };
@@ -591,8 +636,10 @@ export const register: Register = (on: On, options: PluginOptions) => {
       const installed = async (outcome: CompactResult, kind: 'compacted' | 'calls-removed') => {
         reporting.runs += 1;
         reporting.freed += tokensFreed(outcome);
-        await record($, configured.ledgerDir, { ...roundFields(outcome, jevTokens), trigger: event.trigger, outcome: kind });
-        await showStatus($, reporting);
+        // The percentage shown was measured before this compaction.
+        reporting.lastPercent = undefined;
+        await bounded($, record($, configured.ledgerDir, { ...roundFields(outcome, jevTokens), trigger: event.trigger, outcome: kind }));
+        await bounded($, showStatus($, reporting));
       };
       if (config.logDecisions) {
         if (redacted > 0) $.ui.log(`redacted ${redacted} secret-shaped value(s) from the Jev request`);
@@ -647,8 +694,8 @@ export const register: Register = (on: On, options: PluginOptions) => {
     try {
       const { context } = await $.session.usage();
       const used = context.percent ?? 0;
-      reporting.lastPercent = used;
-      await showStatus($, reporting);
+      reporting.lastPercent = context.percent;
+      await bounded($, showStatus($, reporting));
       if (used < configured.compactAtPercent) retryAtPercent = 0;
       if (used < Math.max(configured.compactAtPercent, retryAtPercent)) return next(event);
       const { skip } = await $.session.compact();

@@ -32,6 +32,8 @@ export type LedgerEvent = {
   requests?: number;
   /** Input tokens Jev reported for the round, or the state estimate when it reported none. */
   jevTokens?: number;
+  /** Whether `jevTokens` is what Jev reported (true) or the estimate (false). */
+  jevTokensReported?: boolean;
   ms?: number;
   reason?: string;
 };
@@ -62,6 +64,7 @@ export function roundFields(
     callsDropped: stats.callsDropped,
     requests: stats.requests,
     jevTokens: reportedJevTokens > 0 ? reportedJevTokens : stats.requests * stats.stateTokens,
+    jevTokensReported: reportedJevTokens > 0,
     ms: stats.ms,
   };
 }
@@ -85,10 +88,15 @@ export function parseExcludePaths(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
-/** The first `excludePaths` entry found in `cwd` (case-insensitive), if any. */
-export function excludedBy(cwd: string, excludePaths: readonly string[]): string | undefined {
-  const lower = cwd.toLowerCase();
-  return excludePaths.find((part) => lower.includes(part.toLowerCase()));
+/** Case and Unicode form (a macOS path is decomposed, a typed entry is not) do not tell two names apart. */
+function comparable(text: string): string {
+  return text.normalize('NFC').toLowerCase();
+}
+
+/** The first `excludePaths` entry found in `place` (a directory or a remote URL), if any. */
+export function excludedBy(place: string, excludePaths: readonly string[]): string | undefined {
+  const where = comparable(place);
+  return excludePaths.find((part) => where.includes(comparable(part)));
 }
 
 /** The surface a session runs on, from what its environment says. */
@@ -105,8 +113,18 @@ export function ledgerFileName(ts: string, nonce: string): string {
   return `${ts.replace(/[^0-9TZ]/g, '')}-${nonce}.json`;
 }
 
-export function shortReason(reason: string): string {
-  return reason.length > REASON_MAX_CHARS ? `${reason.slice(0, REASON_MAX_CHARS)}…` : reason;
+const OWN_REASON =
+  /^(below \d+% minimum: [\w%~ ,;()]+|Jev compaction timed out after \d+ms|TYPESAFE_API_KEY is not configured|Jev returned malformed JSON|Jev response is missing answers)$/;
+
+/**
+ * Why nothing was installed, as the ledger may hold it: one of the hook's own
+ * sentences, or a provider failure cut to its status. A provider's error body
+ * can echo what it was sent, so none of it is written.
+ */
+export function ledgerReason(why: string): string {
+  if (why.length <= REASON_MAX_CHARS && OWN_REASON.test(why)) return why;
+  const http = /^Jev request failed \((\d{3})\)/.exec(why);
+  return http ? `Jev request failed (${http[1]})` : 'error';
 }
 
 function compactNumber(tokens: number): string {
