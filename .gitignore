@@ -2,3 +2,8 @@ node_modules
 dist
 .env
 demo/JevDemo/build
+
+# Lokale Geheimnisse nie committen (Vorlage .env.example bleibt erlaubt)
+.env
+.env.*
+!.env.example
